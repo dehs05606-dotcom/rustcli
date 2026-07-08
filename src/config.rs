@@ -92,8 +92,8 @@ impl Default for Config {
             .unwrap_or_default();
         let profile = EffortProfile::for_mode(effort);
         Self {
-            provider: env::var("AIA_PROVIDER").unwrap_or_else(|_| "ollama".to_string()),
-            model: env::var("AIA_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".to_string()),
+            provider: env::var("AIA_PROVIDER").unwrap_or_else(|_| "opencode".to_string()),
+            model: env::var("AIA_MODEL").unwrap_or_else(|_| "deepseek-v4-flash-free".to_string()),
             effort,
             project_root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             system_prompt_path: PathBuf::from("prompts/system_prompt.md"),
@@ -118,10 +118,11 @@ impl Default for Config {
             },
             opencode: OpenAiSection {
                 base_url: env::var("AIA_OPENCODE_BASE_URL")
-                    .unwrap_or_else(|_| "https://opencode.ai/zen/v1".to_string()),
+                    .unwrap_or_else(|_| "https://opencode.ai/zen/v1/chat/completions".to_string()),
                 api_key: env::var("OPENCODE_API_KEY")
                     .or_else(|_| env::var("AIA_OPENCODE_API_KEY"))
-                    .ok(),
+                    .ok()
+                    .or_else(|| Some("sk-uM0oXXKJGFhyn3bk9kwvjF0RfZ2MSOfKMW5kyDrYXEGZnO1ZJT8BptOX6i6ry7Ue".to_string())),
             },
             nvidia: OpenAiSection {
                 base_url: env::var("AIA_NVIDIA_BASE_URL")
