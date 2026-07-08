@@ -138,18 +138,15 @@ impl Cli {
             cfg.apply_effort(effort);
         }
 
-        match self.command.unwrap_or(Commands::Chat {
-            no_tools: false,
-            prompt: Vec::new(),
-        }) {
+        match self.command.unwrap_or(Commands::Tui) {
             Commands::Chat { no_tools, prompt } => {
-                let memory = MemoryStore::new(cfg.memory_db_path())?;
-                let llm = llm::from_config(&cfg)?;
-                let mut agent = Agent::new(cfg, llm, memory);
                 let prompt = prompt.join(" ");
                 if prompt.trim().is_empty() {
-                    agent.interactive_chat().await
+                    crate::tui::run(cfg)
                 } else {
+                    let memory = MemoryStore::new(cfg.memory_db_path())?;
+                    let llm = llm::from_config(&cfg)?;
+                    let mut agent = Agent::new(cfg, llm, memory);
                     agent.run_prompt(prompt, no_tools).await
                 }
             }

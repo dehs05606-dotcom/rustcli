@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame, Terminal,
 };
 use std::{io, time::Duration};
@@ -40,42 +40,40 @@ pub fn run(cfg: Config) -> Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
     let result = App::new(cfg).run(&mut terminal);
-
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
 }
 
-struct Message {
-    time: String,
-    role: String,
+struct Msg {
+    role: &'static str,
     color: Color,
-    content: String,
+    time: String,
+    text: String,
 }
 
 struct App {
     cfg: Config,
-    messages: Vec<Message>,
+    msgs: Vec<Msg>,
     input: String,
-    cursor_visible: bool,
+    cursor_on: bool,
     tick: u64,
-    show_suggestions: bool,
-    selected_suggestion: usize,
-    suggestions: Vec<CmdSuggestion>,
-    command_history: Vec<String>,
-    history_cursor: Option<usize>,
+    show_popup: bool,
+    sel: usize,
+    cmds: Vec<Cmd>,
+    history: Vec<String>,
+    hist_pos: Option<usize>,
     scroll: usize,
-    file_tools: FileTools,
-    shell_tool: ShellTool,
+    file: FileTools,
+    shell: ShellTool,
 }
 
 #[derive(Clone)]
-struct CmdSuggestion {
+struct Cmd {
     label: String,
-    detail: String,
+    desc: String,
     insert: String,
     color: Color,
 }
@@ -83,58 +81,42 @@ struct CmdSuggestion {
 impl App {
     fn new(cfg: Config) -> Self {
         let root = cfg.project_root.clone();
-        let mut messages = Vec::new();
-        messages.push(Message::new("SYSTEM", GREEN, &format!(
-            "AIA Terminal v0.3 — {} | {} | effort={}",
-            cfg.provider, cfg.model, cfg.effort
+        let mut msgs = Vec::new();
+        msgs.push(Msg::new("SYSTEM", GREEN, &format!(
+            "rustcli v0.4 — {} / {} / effort={}", cfg.provider, cfg.model, cfg.effort
         )));
-        messages.push(Message::new("AIA", CYAN, &format!(
-            "Type / for commands, or just ask me anything. I can read/write files, run shell commands, and search code."
-        )));
-
+        msgs.push(Msg::new("AIA", CYAN, "Type / for commands — read, edit, shell, search, and more."));
         App {
             cfg,
-            messages,
+            msgs,
             input: String::new(),
-            cursor_visible: true,
+            cursor_on: true,
             tick: 0,
-            show_suggestions: false,
-            selected_suggestion: 0,
-            suggestions: Vec::new(),
-            command_history: Vec::new(),
-            history_cursor: None,
+            show_popup: false,
+            sel: 0,
+            cmds: Vec::new(),
+            history: Vec::new(),
+            hist_pos: None,
             scroll: 0,
-            file_tools: FileTools::new(root.clone()),
-            shell_tool: ShellTool::new(root),
+            file: FileTools::new(root.clone()),
+            shell: ShellTool::new(root),
         }
     }
 
     fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         loop {
-            terminal.draw(|frame| self.draw(frame))?;
+            terminal.draw(|f| self.draw(f))?;
             self.tick = self.tick.wrapping_add(1);
-            self.cursor_visible = self.tick % 12 < 6;
-
+            self.cursor_on = self.tick % 12 < 6;
             if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
-                    Event::Key(key) => {
-                        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                        if ctrl && key.code == KeyCode::Char('c') {
-                            break;
-                        }
-                        if ctrl {
-                            match key.code {
-                                KeyCode::Char('l') => self.clear_history(),
-                                KeyCode::Char('d') => { break; }
-                                _ => {}
-                            }
-                            continue;
-                        }
-                        if !self.handle_key(key.code) {
-                            break;
-                        }
+                    Event::Key(k) => {
+                        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                        if ctrl && k.code == KeyCode::Char('c') { break; }
+                        if ctrl && k.code == KeyCode::Char('l') { self.clear(); continue; }
+                        if ctrl && k.code == KeyCode::Char('d') { break; }
+                        if !self.key(k.code) { break; }
                     }
-                    Event::Resize(_, _) => {}
                     _ => {}
                 }
             }
@@ -142,587 +124,363 @@ impl App {
         Ok(())
     }
 
-    fn handle_key(&mut self, code: KeyCode) -> bool {
+    fn key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Esc => return false,
             KeyCode::Char('q') if self.input.is_empty() => return false,
             KeyCode::Enter => self.submit(),
-            KeyCode::Backspace => { self.input.pop(); self.update_suggestions(); }
-            KeyCode::Tab => self.accept_suggestion(),
-            KeyCode::Up => self.history_back(),
-            KeyCode::Down => self.history_forward(),
+            KeyCode::Backspace => { self.input.pop(); self.build_cmds(); }
+            KeyCode::Tab => self.accept(),
+            KeyCode::Up => self.hist_bk(),
+            KeyCode::Down => self.hist_fw(),
             KeyCode::PageUp => {
-                if self.show_suggestions && !self.suggestions.is_empty() {
-                    let len = self.suggestions.len();
-                    self.selected_suggestion = if self.selected_suggestion == 0 { len - 1 } else { self.selected_suggestion - 1 };
+                if self.show_popup && !self.cmds.is_empty() {
+                    let n = self.cmds.len();
+                    self.sel = if self.sel == 0 { n - 1 } else { self.sel - 1 };
                 } else {
-                    self.scroll = self.scroll.saturating_add(5);
+                    self.scroll = self.scroll.saturating_add(3);
                 }
             }
             KeyCode::PageDown => {
-                if self.show_suggestions && !self.suggestions.is_empty() {
-                    let len = self.suggestions.len();
-                    self.selected_suggestion = (self.selected_suggestion + 1) % len;
+                if self.show_popup && !self.cmds.is_empty() {
+                    let n = self.cmds.len();
+                    self.sel = (self.sel + 1) % n;
                 } else {
-                    self.scroll = self.scroll.saturating_sub(5);
+                    self.scroll = self.scroll.saturating_sub(3);
                 }
             }
-            KeyCode::Home => self.scroll = self.messages.len(),
+            KeyCode::Home => self.scroll = self.msgs.len(),
             KeyCode::End => self.scroll = 0,
-            KeyCode::Char(c) => { self.input.push(c); self.update_suggestions(); }
+            KeyCode::Char(c) => { self.input.push(c); self.build_cmds(); }
             _ => {}
         }
         true
     }
 
-    fn update_suggestions(&mut self) {
+    fn build_cmds(&mut self) {
         let q = self.input.to_ascii_lowercase();
         let is_slash = q.starts_with('/');
-
         let mut all = Vec::new();
-
-        all.push(CmdSuggestion::new("/help", "Show available commands", "/help", GREEN));
-        all.push(CmdSuggestion::new("/clear", "Clear terminal history", "/clear", RED));
-        all.push(CmdSuggestion::new("/status", "Show runtime config", "/status", CYAN));
-        all.push(CmdSuggestion::new("/effort fast", "Fast mode — low latency", "/effort fast", GREEN));
-        all.push(CmdSuggestion::new("/effort balanced", "Balanced mode", "/effort balanced", BLUE));
-        all.push(CmdSuggestion::new("/effort deep", "Deep analysis mode", "/effort deep", PURPLE));
-        all.push(CmdSuggestion::new("/effort max", "Maximum context mode", "/effort max", ORANGE));
-        all.push(CmdSuggestion::new("/model <name>", "Switch AI model", "/model ", PURPLE));
-        all.push(CmdSuggestion::new("/provider <name>", "Switch provider", "/provider ", CYAN));
-        all.push(CmdSuggestion::new("/read <file>", "Read a file", "/read ", BLUE));
-        all.push(CmdSuggestion::new("/edit <file> <old> <new>", "Replace text in a file", "/edit ", ORANGE));
-        all.push(CmdSuggestion::new("/write <file> <content>", "Write content to a file", "/write ", YELLOW));
-        all.push(CmdSuggestion::new("/shell <command>", "Run a shell command", "/shell ", GREEN));
-        all.push(CmdSuggestion::new("/search <pattern>", "Search codebase with regex", "/search ", PURPLE));
-
+        all.push(Cmd::new("/help", "Show all commands", "/help", GREEN));
+        all.push(Cmd::new("/clear", "Clear history", "/clear", RED));
+        all.push(Cmd::new("/status", "Show runtime config", "/status", CYAN));
+        all.push(Cmd::new("/effort fast", "Low-latency mode", "/effort fast", GREEN));
+        all.push(Cmd::new("/effort balanced", "Default mode", "/effort balanced", BLUE));
+        all.push(Cmd::new("/effort deep", "Deep analysis", "/effort deep", PURPLE));
+        all.push(Cmd::new("/effort max", "Max context", "/effort max", ORANGE));
+        all.push(Cmd::new("/model <name>", "Switch model", "/model ", PURPLE));
+        all.push(Cmd::new("/provider <name>", "Switch provider", "/provider ", CYAN));
+        all.push(Cmd::new("/read <file>", "Read a file", "/read ", BLUE));
+        all.push(Cmd::new("/edit <file> <old> <new>", "Replace in file", "/edit ", ORANGE));
+        all.push(Cmd::new("/write <file> <text>", "Write a file", "/write ", YELLOW));
+        all.push(Cmd::new("/shell <cmd>", "Run shell command", "/shell ", GREEN));
+        all.push(Cmd::new("/search <regex>", "Search codebase", "/search ", PURPLE));
         if is_slash {
-            self.show_suggestions = true;
-            self.suggestions = all.into_iter()
-                .filter(|s| s.label.to_ascii_lowercase().contains(&q) || q == "/")
-                .collect();
-        } else if !q.is_empty() {
-            self.show_suggestions = false;
-            self.suggestions.clear();
+            self.show_popup = true;
+            self.cmds = all.into_iter().filter(|c| c.label.to_ascii_lowercase().contains(&q) || q == "/").collect();
         } else {
-            self.show_suggestions = false;
-            self.suggestions.clear();
+            self.show_popup = false;
+            self.cmds.clear();
         }
-
-        if self.selected_suggestion >= self.suggestions.len() {
-            self.selected_suggestion = self.suggestions.len().saturating_sub(1);
-        }
+        if self.sel >= self.cmds.len() { self.sel = self.cmds.len().saturating_sub(1); }
     }
 
-    fn accept_suggestion(&mut self) {
-        if self.suggestions.is_empty() || !self.show_suggestions {
-            if !self.input.is_empty() {
-                let cmd = self.input.trim().to_string();
-                if cmd.starts_with('/') {
-                    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-                    if parts.len() == 1 {
-                        let completed = self.complete_slash(&cmd);
-                        if let Some(completed) = completed {
-                            self.input = completed;
-                            self.update_suggestions();
-                        }
+    fn accept(&mut self) {
+        if !self.show_popup || self.cmds.is_empty() {
+            if self.input.starts_with('/') && !self.input.contains(' ') {
+                for c in &[
+                    "/help","/clear","/status","/effort","/model","/provider",
+                    "/read","/edit","/write","/shell","/search",
+                ] {
+                    if c.starts_with(&self.input) && c != &self.input {
+                        self.input = c.to_string() + " ";
+                        self.build_cmds();
+                        return;
                     }
                 }
             }
             return;
         }
-        let idx = self.selected_suggestion.min(self.suggestions.len() - 1);
-        let suggestion = self.suggestions[idx].clone();
-        self.input = suggestion.insert;
-        self.show_suggestions = false;
-        self.suggestions.clear();
-        self.selected_suggestion = 0;
+        let i = self.sel.min(self.cmds.len() - 1);
+        self.input = self.cmds[i].insert.clone();
+        self.show_popup = false;
+        self.cmds.clear();
+        self.sel = 0;
     }
 
-    fn complete_slash(&self, cmd: &str) -> Option<String> {
-        let slash_commands = [
-            "/help", "/clear", "/status", "/effort", "/model", "/provider",
-            "/read", "/edit", "/write", "/shell", "/search",
-        ];
-        for sc in slash_commands {
-            if sc.starts_with(cmd) && sc != cmd {
-                return Some(sc.to_string() + " ");
-            }
-        }
-        None
+    fn hist_bk(&mut self) {
+        if !self.input.is_empty() || self.history.is_empty() { return; }
+        let p = self.hist_pos.unwrap_or(self.history.len()).saturating_sub(1);
+        self.hist_pos = Some(p);
+        self.input = self.history[p].clone();
+        self.show_popup = false;
     }
 
-    fn history_back(&mut self) {
-        if self.input.is_empty() && !self.command_history.is_empty() {
-            let prev = self.history_cursor.unwrap_or(self.command_history.len()).saturating_sub(1);
-            self.history_cursor = Some(prev);
-            self.input = self.command_history[prev].clone();
-            self.show_suggestions = false;
-        }
-    }
-
-    fn history_forward(&mut self) {
-        if let Some(idx) = self.history_cursor {
-            let next = idx + 1;
-            if next < self.command_history.len() {
-                self.history_cursor = Some(next);
-                self.input = self.command_history[next].clone();
+    fn hist_fw(&mut self) {
+        if let Some(p) = self.hist_pos {
+            let n = p + 1;
+            if n < self.history.len() {
+                self.hist_pos = Some(n);
+                self.input = self.history[n].clone();
             } else {
-                self.history_cursor = None;
+                self.hist_pos = None;
                 self.input.clear();
             }
-            self.show_suggestions = false;
+            self.show_popup = false;
         }
     }
 
     fn submit(&mut self) {
-        let input = self.input.trim().to_string();
-        if input.is_empty() {
-            return;
-        }
+        let s = self.input.trim().to_string();
+        if s.is_empty() { return; }
         self.input.clear();
-        self.show_suggestions = false;
-        self.suggestions.clear();
-        self.selected_suggestion = 0;
-        self.history_cursor = None;
-
-        if self.command_history.last().map(String::as_str) != Some(&input) {
-            self.command_history.push(input.clone());
-            if self.command_history.len() > 100 {
-                self.command_history.remove(0);
-            }
+        self.show_popup = false;
+        self.cmds.clear();
+        self.sel = 0;
+        self.hist_pos = None;
+        if self.history.last().map(String::as_str) != Some(&s) {
+            self.history.push(s.clone());
+            if self.history.len() > 100 { self.history.remove(0); }
         }
-
-        self.messages.push(Message::new("USER", ORANGE, &input));
-        self.scroll = self.messages.len();
-
-        if input.starts_with('/') {
-            self.execute_command(&input);
-        } else {
-            self.messages.push(Message::new("AIA", CYAN, &format!(
-                "Use / commands for file ops, shell, search. Type / to see all commands."
-            )));
-        }
+        self.msgs.push(Msg::new("USER", ORANGE, &s));
+        self.scroll = self.msgs.len();
+        if s.starts_with('/') { self.exec(&s); }
+        else { self.msgs.push(Msg::new("AIA", CYAN, "Type / for commands")); }
     }
 
-    fn execute_command(&mut self, input: &str) {
-        let mut parts = input.splitn(3, ' ');
+    fn exec(&mut self, s: &str) {
+        let mut parts = s.splitn(3, ' ');
         let cmd = parts.next().unwrap_or_default();
         let rest = parts.collect::<Vec<&str>>().join(" ");
 
         match cmd {
             "/help" => {
-                let help = vec![
+                self.msgs.push(Msg::new("AIA", GREEN, &[
                     "/help       — Show this help",
-                    "/clear      — Clear terminal history (Ctrl+L)",
-                    "/status     — Show runtime configuration",
-                    "/effort     — fast | balanced | deep | max",
-                    "/model      — Switch AI model",
+                    "/clear      — Clear (Ctrl+L)",
+                    "/status     — Runtime info",
+                    "/effort     — fast|balanced|deep|max",
+                    "/model      — Switch model",
                     "/provider   — Switch provider",
-                    "/read       — Read a file: /read src/main.rs",
-                    "/edit       — Replace text: /edit file <old> <new>",
-                    "/write      — Write file: /write file <content>",
-                    "/shell      — Run a shell command",
-                    "/search     — Search code with regex",
-                ];
-                self.messages.push(Message::new("AIA", GREEN, &help.join("\n")));
+                    "/read       — /read <file>",
+                    "/edit       — /edit <file> <old> <new>",
+                    "/write      — /write <file> <text>",
+                    "/shell      — /shell <command>",
+                    "/search     — /search <regex>",
+                ].join("\n")));
             }
-            "/clear" => self.clear_history(),
+            "/clear" => self.clear(),
             "/status" => {
-                self.messages.push(Message::new("AIA", CYAN, &self.cfg.runtime_summary()));
+                self.msgs.push(Msg::new("AIA", CYAN, &self.cfg.runtime_summary()));
             }
             "/effort" => {
-                let mode = rest.trim();
-                if mode.is_empty() {
-                    self.messages.push(Message::new("AIA", CYAN, &format!(
-                        "Current effort: {}. Options: fast, balanced, deep, max", self.cfg.effort
-                    )));
+                let m = rest.trim();
+                if m.is_empty() {
+                    self.msgs.push(Msg::new("AIA", CYAN, &format!("Effort: {}. Options: fast, balanced, deep, max", self.cfg.effort)));
+                } else if let Ok(mode) = m.parse::<crate::model_catalog::EffortMode>() {
+                    self.cfg.apply_effort_with_recommended_model(mode);
+                    self.msgs.push(Msg::new("AIA", GREEN, &format!("Effort: {} | model: {}", self.cfg.effort, self.cfg.model)));
                 } else {
-                    use crate::model_catalog::EffortMode;
-                    if let Ok(mode) = mode.parse::<EffortMode>() {
-                        self.cfg.apply_effort_with_recommended_model(mode);
-                        self.messages.push(Message::new("AIA", GREEN, &format!(
-                            "Effort switched to {} | model={}", self.cfg.effort, self.cfg.model
-                        )));
-                    } else {
-                        self.messages.push(Message::new("ERROR", RED, &format!("Invalid effort mode: {}", mode)));
-                    }
+                    self.msgs.push(Msg::new("AIA", RED, &format!("Invalid: {}", m)));
                 }
             }
             "/model" => {
-                let model = rest.trim();
-                if model.is_empty() {
-                    self.messages.push(Message::new("AIA", CYAN, &format!(
-                        "Current model: {}. Use /model <name>", self.cfg.model
-                    )));
-                } else {
-                    let old = self.cfg.model.clone();
-                    self.cfg.model = model.to_string();
-                    self.messages.push(Message::new("AIA", GREEN, &format!(
-                        "Model changed: {} -> {}", old, self.cfg.model
-                    )));
-                }
+                let m = rest.trim();
+                if m.is_empty() { self.msgs.push(Msg::new("AIA", CYAN, &format!("Model: {}", self.cfg.model))); }
+                else { let o = self.cfg.model.clone(); self.cfg.model = m.to_string(); self.msgs.push(Msg::new("AIA", GREEN, &format!("Model: {} → {}", o, m))); }
             }
             "/provider" => {
-                let provider = rest.trim();
-                if provider.is_empty() {
-                    self.messages.push(Message::new("AIA", CYAN, &format!(
-                        "Current provider: {}. Use /provider <name>", self.cfg.provider
-                    )));
-                } else {
-                    let old = self.cfg.provider.clone();
-                    self.cfg.provider = provider.to_string();
-                    self.messages.push(Message::new("AIA", GREEN, &format!(
-                        "Provider changed: {} -> {}", old, self.cfg.provider
-                    )));
-                }
+                let p = rest.trim();
+                if p.is_empty() { self.msgs.push(Msg::new("AIA", CYAN, &format!("Provider: {}", self.cfg.provider))); }
+                else { let o = self.cfg.provider.clone(); self.cfg.provider = p.to_string(); self.msgs.push(Msg::new("AIA", GREEN, &format!("Provider: {} → {}", o, p))); }
             }
             "/read" => {
-                let path = rest.trim();
-                if path.is_empty() {
-                    self.messages.push(Message::new("AIA", ORANGE, "Usage: /read <filepath>"));
-                } else {
-                    match self.file_tools.read(path, 200_000) {
-                        Ok(result) => {
-                            let mut content = format!("📄 {} ({} bytes)", result.path, result.bytes);
-                            if result.truncated {
-                                content.push_str(" [truncated]");
-                            }
-                            content.push('\n');
-                            content.push_str(&result.content);
-                            self.messages.push(Message::new("FILE", BLUE, &content));
-                        }
-                        Err(e) => {
-                            self.messages.push(Message::new("ERROR", RED, &format!("Failed to read: {:#}", e)));
-                        }
+                let p = rest.trim();
+                if p.is_empty() { self.msgs.push(Msg::new("AIA", ORANGE, "Usage: /read <file>")); }
+                else {
+                    match self.file.read(p, 200_000) {
+                        Ok(r) => { let mut c = format!("📄 {} ({}b)", r.path, r.bytes); if r.truncated { c.push_str(" [truncated]"); } c.push('\n'); c.push_str(&r.content); self.msgs.push(Msg::new("FILE", BLUE, &c)); }
+                        Err(e) => { self.msgs.push(Msg::new("AIA", RED, &format!("{:#}", e))); }
                     }
                 }
             }
             "/edit" => {
-                let args: Vec<&str> = rest.splitn(3, ' ').collect();
-                if args.len() < 3 {
-                    self.messages.push(Message::new("AIA", ORANGE, "Usage: /edit <file> <old> <new>"));
-                } else {
-                    let file = args[0];
-                    let old = args[1];
-                    let new = args[2];
-                    match self.file_tools.replace(file, old, new, false, true) {
-                        Ok(preview) => {
-                            self.messages.push(Message::new("FILE", GREEN, &format!(
-                                "Edited {}:\n{}", file, preview.diff
-                            )));
-                        }
-                        Err(e) => {
-                            self.messages.push(Message::new("ERROR", RED, &format!("Edit failed: {:#}", e)));
-                        }
+                let a: Vec<&str> = rest.splitn(3, ' ').collect();
+                if a.len() < 3 { self.msgs.push(Msg::new("AIA", ORANGE, "Usage: /edit <file> <old> <new>")); }
+                else {
+                    match self.file.replace(a[0], a[1], a[2], false, true) {
+                        Ok(p) => { self.msgs.push(Msg::new("FILE", GREEN, &format!("Edited {}:\n{}", a[0], p.diff))); }
+                        Err(e) => { self.msgs.push(Msg::new("AIA", RED, &format!("{:#}", e))); }
                     }
                 }
             }
             "/write" => {
-                let args: Vec<&str> = rest.splitn(2, ' ').collect();
-                if args.len() < 2 {
-                    self.messages.push(Message::new("AIA", ORANGE, "Usage: /write <file> <content>"));
-                } else {
-                    match self.file_tools.write(args[0], args[1]) {
-                        Ok(preview) => {
-                            let msg = if let Some(backup) = preview.backup_path {
-                                format!("Written to {} (backup: {})", preview.path, backup)
-                            } else {
-                                format!("Created {}", preview.path)
-                            };
-                            self.messages.push(Message::new("FILE", GREEN, &msg));
-                        }
-                        Err(e) => {
-                            self.messages.push(Message::new("ERROR", RED, &format!("Write failed: {:#}", e)));
-                        }
+                let a: Vec<&str> = rest.splitn(2, ' ').collect();
+                if a.len() < 2 { self.msgs.push(Msg::new("AIA", ORANGE, "Usage: /write <file> <text>")); }
+                else {
+                    match self.file.write(a[0], a[1]) {
+                        Ok(p) => { let m = if p.backup_path.is_some() { format!("Written {} (backup saved)", p.path) } else { format!("Created {}", p.path) }; self.msgs.push(Msg::new("FILE", GREEN, &m)); }
+                        Err(e) => { self.msgs.push(Msg::new("AIA", RED, &format!("{:#}", e))); }
                     }
                 }
             }
             "/shell" => {
-                let command = rest.trim();
-                if command.is_empty() {
-                    self.messages.push(Message::new("AIA", ORANGE, "Usage: /shell <command>"));
-                } else {
-                    self.messages.push(Message::new("SHELL", YELLOW, &format!("$ {}", command)));
-                    match tokio::runtime::Runtime::new() {
-                        Ok(rt) => {
-                            match rt.block_on(self.shell_tool.run(command, true)) {
-                                Ok(output) => {
-                                    let mut out = String::new();
-                                    if let Some(status) = output.status {
-                                        out.push_str(&format!("Exit code: {}\n", status));
-                                    }
-                                    if !output.stdout.is_empty() {
-                                        out.push_str(&output.stdout);
-                                    }
-                                    if !output.stderr.is_empty() {
-                                        out.push_str(&output.stderr);
-                                    }
-                                    self.messages.push(Message::new("SHELL", GREEN, &out));
-                                }
-                                Err(e) => {
-                                    self.messages.push(Message::new("ERROR", RED, &format!("{:#}", e)));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.messages.push(Message::new("ERROR", RED, &format!("Runtime error: {:#}", e)));
+                let c = rest.trim();
+                if c.is_empty() { self.msgs.push(Msg::new("AIA", ORANGE, "Usage: /shell <cmd>")); }
+                else {
+                    self.msgs.push(Msg::new("SHELL", YELLOW, &format!("$ {}", c)));
+                    if let Ok(rt) = tokio::runtime::Runtime::new() {
+                        match rt.block_on(self.shell.run(c, true)) {
+                            Ok(o) => { let mut out = String::new(); if let Some(s) = o.status { out.push_str(&format!("exit: {}\n", s)); } out.push_str(&o.stdout); out.push_str(&o.stderr); self.msgs.push(Msg::new("SHELL", GREEN, &out)); }
+                            Err(e) => { self.msgs.push(Msg::new("AIA", RED, &format!("{:#}", e))); }
                         }
                     }
                 }
             }
             "/search" => {
-                let pattern = rest.trim();
-                if pattern.is_empty() {
-                    self.messages.push(Message::new("AIA", ORANGE, "Usage: /search <regex-pattern>"));
-                } else {
-                    match tokio::runtime::Runtime::new() {
-                        Ok(rt) => {
-                            let search = SearchTool::new(self.cfg.project_root.clone());
-                            match rt.block_on(search.regex_search(pattern, ".", 100)) {
-                                Ok(matches) => {
-                                    if matches.is_empty() {
-                                        self.messages.push(Message::new("SEARCH", DIM, &format!("No results for: {}", pattern)));
-                                    } else {
-                                        let lines: Vec<String> = matches.iter().map(|m| {
-                                            format!("{}:{}:{}", m.path, m.line, m.text)
-                                        }).collect();
-                                        self.messages.push(Message::new("SEARCH", PURPLE, &lines.join("\n")));
-                                    }
-                                }
-                                Err(e) => {
-                                    self.messages.push(Message::new("ERROR", RED, &format!("Search failed: {:#}", e)));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.messages.push(Message::new("ERROR", RED, &format!("Runtime error: {:#}", e)));
-                        }
+                let p = rest.trim();
+                if p.is_empty() { self.msgs.push(Msg::new("AIA", ORANGE, "Usage: /search <regex>")); }
+                else if let Ok(rt) = tokio::runtime::Runtime::new() {
+                    let search = SearchTool::new(self.cfg.project_root.clone());
+                    match rt.block_on(search.regex_search(p, ".", 100)) {
+                        Ok(m) => { if m.is_empty() { self.msgs.push(Msg::new("AIA", DIM, &format!("No results: {}", p))); } else { let l: Vec<String> = m.iter().map(|m| format!("{}:{}:{}", m.path, m.line, m.text)).collect(); self.msgs.push(Msg::new("SEARCH", PURPLE, &l.join("\n"))); } }
+                        Err(e) => { self.msgs.push(Msg::new("AIA", RED, &format!("{:#}", e))); }
                     }
                 }
             }
-            _ => {
-                self.messages.push(Message::new("AIA", RED, &format!(
-                    "Unknown command: {}. Type /help for available commands.", cmd
-                )));
-            }
+            _ => { self.msgs.push(Msg::new("AIA", RED, &format!("Unknown: {}. Type /help", cmd))); }
         }
-        self.scroll = self.messages.len();
-        self.prune();
+        self.scroll = self.msgs.len();
+        if self.msgs.len() > 500 { self.msgs.drain(0..(self.msgs.len() - 500)); }
     }
 
-    fn clear_history(&mut self) {
-        self.messages.clear();
-        self.messages.push(Message::new("SYSTEM", GREEN, "Terminal history cleared"));
-        self.scroll = self.messages.len();
+    fn clear(&mut self) {
+        self.msgs.clear();
+        self.msgs.push(Msg::new("SYSTEM", GREEN, "Cleared"));
+        self.scroll = self.msgs.len();
     }
 
-    fn prune(&mut self) {
-        if self.messages.len() > 500 {
-            self.messages.drain(0..(self.messages.len() - 500));
-        }
-    }
+    // ─── DRAW ────────────────────────────────────────────────
 
-    // ─── Drawing ───────────────────────────────────────────────
+    fn draw(&self, f: &mut Frame) {
+        let area = f.area();
+        f.render_widget(Block::default().style(Style::default().bg(DEEP_BG)), area);
 
-    fn draw(&self, frame: &mut Frame) {
-        let area = frame.area();
-        frame.render_widget(Block::default().style(Style::default().bg(DEEP_BG)), area);
-
-        let layout = Layout::default()
+        let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(2),
-                Constraint::Length(3),
-            ])
+            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
             .split(area);
 
-        self.draw_title(frame, layout[0]);
-        self.draw_chat(frame, layout[1]);
-        self.draw_prompt(frame, layout[2]);
+        self.draw_top(f, rows[0]);
+        self.draw_msgs(f, rows[1]);
+        self.draw_bar(f, rows[2]);
 
-        if self.show_suggestions && !self.suggestions.is_empty() {
-            let popup_area = self.suggestions_popup_area(area);
-            frame.render_widget(Clear, popup_area);
-            self.draw_suggestions_popup(frame, popup_area);
+        if self.show_popup && !self.cmds.is_empty() {
+            let pop = self.popup_area(area);
+            f.render_widget(Clear, pop);
+            self.draw_popup(f, pop);
         }
     }
 
-    fn draw_title(&self, frame: &mut Frame, area: Rect) {
-        let elapsed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() % 10000)
-            .unwrap_or(0);
+    fn draw_top(&self, f: &mut Frame, area: Rect) {
+        let n = self.msgs.len();
+        let s = if self.scroll > 0 { format!(" +{} scroll", self.scroll) } else { String::new() };
+        let msgs_str = format!("{} msgs{}", n, s);
+        let model_str = format!("  {} | {}", self.cfg.provider, self.cfg.model);
         let text = Line::from(vec![
-            Span::styled(" AIA ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("v0.3  {}:{}  effort={}", self.cfg.provider, self.cfg.model, self.cfg.effort), Style::default().fg(DIM)),
-            Span::styled(format!("  session #{}", elapsed), Style::default().fg(ORANGE)),
+            Span::styled(" rustcli ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(msgs_str, Style::default().fg(DIM)),
+            Span::styled(model_str, Style::default().fg(DIM)),
         ]);
-        frame.render_widget(Paragraph::new(text).style(Style::default().bg(DEEP_BG)), area);
+        f.render_widget(Paragraph::new(text).style(Style::default().bg(DEEP_BG)), area);
     }
 
-    fn draw_chat(&self, frame: &mut Frame, area: Rect) {
-        let max_h = area.height.saturating_sub(2) as usize;
-
-        let all_lines: Vec<Line> = self.messages.iter().flat_map(|msg| msg.to_lines(area.width as usize)).collect();
-
-        let total = all_lines.len();
-        let visible_end = total.saturating_sub(self.scroll.min(total));
-        let visible_start = visible_end.saturating_sub(max_h.max(1));
-
-        let lines: Vec<Line> = if visible_start < visible_end {
-            all_lines[visible_start..visible_end].to_vec()
-        } else {
-            vec![Line::from(Span::styled("  (no messages)", Style::default().fg(DIM)))]
-        };
-
-        let scroll_info = if total > max_h && self.scroll > 0 {
-            format!(" Chat  {} lines  ↑ scroll +{} ", total, self.scroll)
-        } else {
-            format!(" Chat  {} lines ", total)
-        };
-
-        let panel = Paragraph::new(lines)
-            .block(Block::default()
-                .title(scroll_info)
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(DIM))
-                .style(Style::default().bg(DEEP_BG)))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(panel, area);
+    fn draw_msgs(&self, f: &mut Frame, area: Rect) {
+        let max_h = area.height.saturating_sub(1) as usize;
+        let all: Vec<Line> = self.msgs.iter().flat_map(|m| m.to_lines(area.width as usize)).collect();
+        let total = all.len();
+        let end = total.saturating_sub(self.scroll.min(total));
+        let start = end.saturating_sub(max_h.max(1));
+        let lines: Vec<Line> = if start < end { all[start..end].to_vec() } else { vec![Line::from(Span::styled("", Style::default().fg(DIM)))] };
+        let panel = Paragraph::new(lines).block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(DIM)).style(Style::default().bg(DEEP_BG)));
+        f.render_widget(panel, area);
     }
 
-    fn draw_prompt(&self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(2)])
-            .split(area);
-
-        let cursor = if self.cursor_visible { "█" } else { " " };
-
-        let prompt_style = Style::default().bg(PANEL_BG).fg(Color::White);
-        let input_line = Line::from(vec![
-            Span::styled(" > ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(&self.input, Style::default().fg(Color::White)),
-            Span::styled(cursor, Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+    fn draw_bar(&self, f: &mut Frame, area: Rect) {
+        let w = area.width as usize;
+        let cursor = if self.cursor_on { "█" } else { " " };
+        let input_str = if self.input.chars().count() > w.saturating_sub(4) {
+            let cut = self.input.chars().skip(self.input.chars().count().saturating_sub(w.saturating_sub(6))).collect::<String>();
+            format!("{}", cut)
+        } else {
+            self.input.clone()
+        };
+        let text = Line::from(vec![
+            Span::styled("> ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(&input_str, Style::default().fg(Color::White)),
+            Span::styled(cursor, Style::default().fg(CYAN)),
         ]);
-
-        let prompt_widget = Paragraph::new(input_line)
-            .block(Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(DIM))
-                .style(prompt_style));
-        frame.render_widget(prompt_widget, chunks[0]);
-
-        let input_chars = self.input.chars().count();
-        let mut hint = String::from(" Ctrl+C quit");
-        if self.show_suggestions && !self.suggestions.is_empty() {
-            hint.push_str("  PgUp/PgDn select  Tab accept");
-        } else {
-            hint.push_str("  ↑↓ history  Tab complete  / commands");
-        }
-        hint.push_str(&format!("  chars: {}", input_chars));
-
-        let status = Paragraph::new(Line::from(Span::styled(&hint, Style::default().fg(DIM))))
-            .style(Style::default().bg(PANEL_BG));
-        frame.render_widget(status, chunks[1]);
+        let bar = Paragraph::new(text).style(Style::default().bg(PANEL_BG));
+        f.render_widget(bar, area);
     }
 
-    fn suggestions_popup_area(&self, area: Rect) -> Rect {
-        let popup_height = (self.suggestions.len().min(12) as u16).saturating_add(2).min(area.height.saturating_sub(8));
-        let popup_width = area.width.saturating_sub(8).min(72).max(40);
-
-        let y = area.height.saturating_sub(6 + popup_height);
-        let x = (area.width.saturating_sub(popup_width)) / 2;
-
-        Rect {
-            x,
-            y: y.max(2),
-            width: popup_width,
-            height: popup_height,
-        }
+    fn popup_area(&self, area: Rect) -> Rect {
+        let h = (self.cmds.len().min(10) as u16).saturating_add(2).min(area.height.saturating_sub(6));
+        let w = area.width.saturating_sub(4).min(64).max(40);
+        let y = area.height.saturating_sub(4 + h);
+        Rect { x: 2, y: y.max(2), width: w, height: h }
     }
 
-    fn draw_suggestions_popup(&self, frame: &mut Frame, area: Rect) {
-        let max_items = area.height.saturating_sub(2) as usize;
-        let items: Vec<ListItem> = self.suggestions
-            .iter()
-            .take(max_items)
-            .enumerate()
-            .map(|(idx, s)| {
-                let selected = idx == self.selected_suggestion % self.suggestions.len();
-                let marker = if selected { "▶" } else { " " };
-                let style = if selected {
-                    Style::default().fg(Color::Black).bg(CYAN).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(s.color)
-                };
-                let detail_style = if selected {
-                    Style::default().fg(Color::Black).bg(CYAN)
-                } else {
-                    Style::default().fg(DIM)
-                };
-                let label_w = 22usize.min(area.width.saturating_sub(6) as usize);
-                let detail_w = area.width.saturating_sub(label_w as u16 + 6) as usize;
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{marker} "), style),
-                    Span::styled(truncate(&s.label, label_w), style),
-                    Span::styled("  ", detail_style),
-                    Span::styled(truncate(&s.detail, detail_w), detail_style),
-                ]))
-            })
-            .collect();
-
-        let popup = List::new(items)
-            .block(Block::default()
-                .title(" Commands ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(CYAN))
-                .style(Style::default().bg(PANEL_BG)));
-        frame.render_widget(popup, area);
+    fn draw_popup(&self, f: &mut Frame, area: Rect) {
+        let max = area.height.saturating_sub(2) as usize;
+        let items: Vec<ListItem> = self.cmds.iter().take(max).enumerate().map(|(i, c)| {
+            let selected = i == self.sel % self.cmds.len();
+            let marker = if selected { "▸" } else { " " };
+            let style = if selected { Style::default().fg(Color::Black).bg(CYAN) } else { Style::default().fg(c.color) };
+            let ws = area.width.saturating_sub(8) as usize;
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} ", marker), style),
+                Span::styled(truncate(&c.label, 24), style),
+                Span::styled("  ", if selected { style } else { Style::default().fg(DIM) }),
+                Span::styled(truncate(&c.desc, ws.saturating_sub(28)), if selected { style } else { Style::default().fg(DIM) }),
+            ]))
+        }).collect();
+        let popup = List::new(items).block(Block::default().title(" / ").borders(Borders::ALL).border_style(Style::default().fg(CYAN)).style(Style::default().bg(PANEL_BG)));
+        f.render_widget(popup, area);
     }
 }
 
-impl Message {
-    fn new(role: &str, color: Color, content: &str) -> Self {
-        Self {
-            time: Local::now().format("%H:%M:%S").to_string(),
-            role: role.to_string(),
-            color,
-            content: content.to_string(),
-        }
+impl Msg {
+    fn new(role: &'static str, color: Color, text: &str) -> Self {
+        Msg { role, color, time: Local::now().format("%H:%M").to_string(), text: text.to_string() }
     }
 
-    fn to_lines(&self, width: usize) -> Vec<Line<'static>> {
+    fn to_lines(&self, w: usize) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         let prefix = format!(" {} ", self.role);
-        let prefix_len = prefix.chars().count() + 2;
-        let wrap_w = width.saturating_sub(prefix_len).max(24);
-
-        let content = self.content.clone();
-        let lines: Vec<String> = if wrap_w < 24 {
-            vec![content]
+        let plen = prefix.chars().count() + 2;
+        let wrap = w.saturating_sub(plen).max(24);
+        let text = self.text.clone();
+        let lines: Vec<String> = if wrap < 24 {
+            vec![text]
         } else {
-            content.lines().flat_map(|l| {
-                if l.chars().count() <= wrap_w {
-                    vec![l.to_string()].into_iter()
-                } else {
+            text.lines().flat_map(|l| {
+                if l.chars().count() <= wrap { vec![l.to_string()].into_iter() }
+                else {
                     let mut chunks = Vec::new();
-                    let mut remaining = l;
-                    while !remaining.is_empty() {
-                        let take = wrap_w.min(remaining.chars().count());
-                        let end = remaining.char_indices().take(take).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(remaining.len());
-                        chunks.push(remaining[..end].to_string());
-                        remaining = &remaining[end..];
+                    let mut s = l;
+                    while !s.is_empty() {
+                        let take = wrap.min(s.chars().count());
+                        let end = s.char_indices().take(take).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(s.len());
+                        chunks.push(s[..end].to_string());
+                        s = &s[end..];
                     }
                     chunks.into_iter()
                 }
             }).collect()
         };
-
-        for (idx, line) in lines.into_iter().enumerate() {
-            if idx == 0 {
+        for (i, line) in lines.into_iter().enumerate() {
+            if i == 0 {
                 out.push(Line::from(vec![
                     Span::styled(format!("[{}]", self.time), Style::default().fg(DIM)),
                     Span::styled(format!(" {} ", self.role), Style::default().fg(self.color).add_modifier(Modifier::BOLD)),
@@ -730,7 +488,7 @@ impl Message {
                 ]));
             } else {
                 out.push(Line::from(vec![
-                    Span::styled(" ".repeat(prefix_len.saturating_sub(2)), Style::default().fg(DIM)),
+                    Span::styled(" ".repeat(plen.saturating_sub(2)), Style::default().fg(DIM)),
                     Span::raw(line),
                 ]));
             }
@@ -739,24 +497,14 @@ impl Message {
     }
 }
 
-impl CmdSuggestion {
-    fn new(label: &str, detail: &str, insert: &str, color: Color) -> Self {
-        Self {
-            label: label.to_string(),
-            detail: detail.to_string(),
-            insert: insert.to_string(),
-            color,
-        }
+impl Cmd {
+    fn new(label: &str, desc: &str, insert: &str, color: Color) -> Self {
+        Cmd { label: label.to_string(), desc: desc.to_string(), insert: insert.to_string(), color }
     }
 }
 
-fn truncate(text: &str, width: usize) -> String {
-    let limit = width.saturating_sub(2).max(4);
-    if text.chars().count() <= limit {
-        text.to_string()
-    } else {
-        let mut out: String = text.chars().take(limit.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
+fn truncate(s: &str, w: usize) -> String {
+    let limit = w.saturating_sub(2).max(4);
+    if s.chars().count() <= limit { s.to_string() }
+    else { let mut o: String = s.chars().take(limit.saturating_sub(1)).collect(); o.push('…'); o }
 }
