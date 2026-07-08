@@ -1,0 +1,7 @@
+[servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]

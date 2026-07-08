@@ -1,0 +1,53 @@
+[package]
+name = "aia-agent"
+version = "0.3.0"
+edition = "2021"
+authors = ["Arena.ai user"]
+description = "Advanced terminal AI coding agent in Rust"
+license = "MIT"
+
+[features]
+default = []
+code-parsing = [
+  "dep:tree-sitter",
+  "dep:tree-sitter-rust",
+  "dep:tree-sitter-javascript",
+  "dep:tree-sitter-python",
+  "dep:tree-sitter-go",
+  "dep:tree-sitter-java",
+]
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+crossterm = "0.28"
+dirs = "5.0"
+dotenvy = "0.15"
+futures-util = "0.3"
+ignore = "0.4"
+ratatui = "0.29"
+regex = "1.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+shell-words = "1.1"
+similar = "2.6"
+thiserror = "1.0"
+tokio = { version = "1.39", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+which = "6.0"
+
+# Optional tree-sitter language parsers. Enable with:
+# cargo build --features code-parsing
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter-javascript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.23", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }

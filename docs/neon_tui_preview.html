@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AIA Neon Terminal Agent Preview v0.3</title>
+<style>
+:root{
+  --bg:#02070d;--bg2:#07101a;--panel:#08121d;--panel2:#0b1823;--line:#24465c;
+  --cyan:#40ebff;--cyan2:#1de8ff;--green:#5bff8f;--purple:#bb86fc;--mag:#ff5cd2;
+  --orange:#ffbe5a;--red:#ff5e78;--blue:#5ea6ff;--dim:#586c80;--text:#e7faff;
+}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 48% -10%,#274d65 0,#091827 42%,#010308 100%);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:28px;overflow:auto}.wrap{max-width:1300px;margin:0 auto}.deck{position:relative;border:2px solid rgba(64,235,255,.82);box-shadow:0 0 28px rgba(64,235,255,.50),0 0 90px rgba(187,134,252,.12),inset 0 0 45px rgba(64,235,255,.07);background:rgba(2,7,13,.94);border-radius:14px;overflow:hidden}.deck:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px);background-size:100% 4px;mix-blend-mode:screen;opacity:.28}.header{height:58px;border-bottom:1px solid rgba(64,235,255,.55);display:flex;align-items:center;justify-content:center;gap:14px;letter-spacing:.04em;background:linear-gradient(90deg,rgba(64,235,255,.10),rgba(187,134,252,.08),rgba(91,255,143,.06))}.header b{color:var(--cyan);text-shadow:0 0 14px var(--cyan)}.badge{padding:3px 9px;border:1px solid rgba(64,235,255,.42);border-radius:999px;background:rgba(64,235,255,.08)}.grid{display:grid;grid-template-columns:56% 21% 23%;min-height:680px}.col{border-right:1px solid rgba(64,235,255,.28)}.col:last-child{border-right:0}.left{display:grid;grid-template-rows:61% 39%}.middle{display:grid;grid-template-rows:62% 38%}.right{display:grid;grid-template-rows:23% 34% 25% 18%}.panel{position:relative;background:linear-gradient(180deg,rgba(8,18,29,.96),rgba(3,7,12,.96));border-bottom:1px solid rgba(64,235,255,.25);padding:36px 14px 12px;overflow:hidden}.panel:before{content:attr(data-title);position:absolute;top:8px;left:12px;color:var(--cyan);font-weight:800;text-shadow:0 0 10px currentColor}.panel:after{content:"";position:absolute;top:0;left:0;width:100%;height:1px;background:linear-gradient(90deg,transparent,var(--cyan),transparent);opacity:.55}.history .line{margin:.44rem 0;white-space:pre-wrap}.time{color:var(--dim)}.tag{font-weight:800}.system{color:var(--green)}.vega{color:var(--purple)}.inputtag{color:var(--orange)}.security{color:var(--red)}.aia{color:var(--cyan)}.thinking{display:inline-block;color:var(--green);animation:pulse 1.3s infinite}.diffgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;height:100%}.code{border:1px solid rgba(64,235,255,.25);padding:10px;background:rgba(0,0,0,.24);font-size:12px;box-shadow:inset 0 0 22px rgba(64,235,255,.04)}.minus{display:block;background:rgba(255,94,120,.17);color:var(--red);padding:2px}.plus{display:block;background:rgba(91,255,143,.15);color:var(--green);padding:2px}.graph{display:grid;place-items:center;text-align:center;color:var(--dim)}.graph b{color:var(--cyan)}.files div{padding:2px 0;color:var(--dim)}.files .rs{color:var(--cyan)}.files .important{color:var(--orange)}.files .doc{color:var(--purple)}.logline{margin:6px 0}.agents div{margin:8px 0;font-size:15px}.dot{color:var(--green);text-shadow:0 0 8px currentColor}.heat{display:grid;grid-template-columns:repeat(24,1fr);gap:2px;margin:8px 0}.cell{height:12px;border-radius:2px;box-shadow:0 0 9px currentColor;animation:rise 1.8s infinite alternate}.c1{background:var(--blue);color:var(--blue)}.c2{background:var(--cyan);color:var(--cyan)}.c3{background:var(--green);color:var(--green)}.c4{background:var(--orange);color:var(--orange)}.c5{background:var(--red);color:var(--red)}.c6{background:var(--purple);color:var(--purple)}.c7{background:var(--mag);color:var(--mag)}.spark{height:44px;border:1px solid rgba(91,255,143,.25);display:flex;align-items:end;gap:3px;padding:5px}.bar{width:6px;background:var(--green);box-shadow:0 0 8px var(--green);animation:bars 1.8s infinite alternate}.gauge{margin:9px 0}.gauge label{display:flex;justify-content:space-between;color:var(--text);font-size:12px}.track{height:9px;border:1px solid rgba(64,235,255,.4);background:#02070d}.fill{height:100%;background:linear-gradient(90deg,var(--blue),var(--green));box-shadow:0 0 10px var(--green)}.router .small{font-size:12px;color:var(--dim);margin:4px 0}.prompt{border-top:2px solid rgba(64,235,255,.78);display:grid;grid-template-columns:68% 32%;min-height:150px}.promptleft{display:grid;grid-template-rows:44px 44px 1fr;border-right:1px solid rgba(64,235,255,.35)}.promptbox,.chips,.status,.autocomplete{padding:10px 14px;background:rgba(4,10,18,.96)}.promptbox{border-bottom:1px solid rgba(64,235,255,.22)}.chips{border-bottom:1px solid rgba(64,235,255,.22);display:flex;align-items:center;gap:8px;flex-wrap:wrap}.chip{padding:4px 9px;border-radius:999px;border:1px solid rgba(88,108,128,.5);color:var(--dim);cursor:pointer;user-select:none}.chip.on{border-color:currentColor;background:rgba(64,235,255,.08);text-shadow:0 0 8px currentColor}.chip.files{color:var(--blue)}.chip.git{color:var(--green)}.chip.tests{color:var(--purple)}.chip.security{color:var(--red)}.chip.docs{color:var(--orange)}.chip.shell{color:var(--cyan)}.status{font-size:12px;color:var(--dim)}.meter{height:7px;background:#02070d;border:1px solid var(--line);margin-top:8px}.meter>i{display:block;height:100%;width:42%;background:linear-gradient(90deg,var(--cyan),var(--green));box-shadow:0 0 10px var(--cyan)}.autocomplete{position:relative}.autocomplete:before{content:"Smart Autocomplete";display:block;color:var(--orange);font-weight:800;margin-bottom:6px;text-shadow:0 0 10px currentColor}.suggest{display:grid;grid-template-columns:20px 1fr;gap:8px;padding:5px;border:1px solid transparent;border-radius:6px;color:var(--green);cursor:pointer}.suggest.active{background:rgba(64,235,255,.13);border-color:rgba(64,235,255,.35)}.suggest small{display:block;color:var(--dim);margin-top:2px}.cursor{display:inline-block;background:var(--orange);color:#000;animation:blink 1s steps(2,end) infinite}.glow{color:var(--cyan);text-shadow:0 0 12px currentColor}.small{font-size:12px;color:var(--dim)}input.cmd{width:calc(100% - 200px);background:transparent;border:0;outline:0;color:var(--text);font:inherit}.palette{position:absolute;inset:9% 12%;background:rgba(3,7,12,.96);border:2px solid var(--cyan);box-shadow:0 0 40px rgba(64,235,255,.45),inset 0 0 40px rgba(64,235,255,.06);border-radius:12px;display:none;padding:16px;z-index:5}.palette.show{display:block}.palette h2{margin:0 0 12px;color:var(--cyan);text-shadow:0 0 14px currentColor}.palette .plist{display:grid;grid-template-columns:1fr 1fr;gap:10px}.pitem{padding:10px;border:1px solid rgba(64,235,255,.25);border-radius:8px;background:rgba(64,235,255,.05);cursor:pointer}.pitem:hover{border-color:var(--green);color:var(--green)}.footer{height:25px;display:flex;align-items:center;gap:14px;padding:0 12px;color:var(--dim);background:#02070d;border-top:1px solid rgba(64,235,255,.2);font-size:12px}@keyframes blink{50%{opacity:0}}@keyframes pulse{50%{filter:brightness(1.8)}}@keyframes rise{to{filter:brightness(1.45);transform:translateY(-1px)}}@keyframes bars{to{height:38px}}@media(max-width:1000px){.grid{grid-template-columns:1fr}.col{border-right:0}.right,.middle,.left{display:block}.panel{min-height:220px}.prompt{grid-template-columns:1fr}.promptleft{border-right:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="deck">
+  <div class="header"><b>AI TERMINAL AGENT</b><span>|</span><span class="badge">Session #1435</span><span>|</span><span class="glow">v0.3-neon</span><span>|</span><span id="headModel">opencode:deepseek-v4-flash-free</span><span>|</span><span id="headEffort">effort=fast ctx=200K</span></div>
+  <div class="grid">
+    <div class="col left">
+      <section class="panel history" data-title="Terminal History  Chat & Output" id="history">
+        <div class="line"><span class="time">[15:15:01]</span> <span class="tag system">[SYSTEM]</span> AIA neon terminal initialized</div>
+        <div class="line"><span class="time">[15:15:02]</span> <span class="tag vega">[VEGA-X]</span> Multi-agent orchestration protocol engaged.</div>
+        <div class="line"><span class="time">[15:15:07]</span> <span class="tag aia">[AIA]</span> <span class="thinking">&lt;Thinking&gt;</span> Context chips, fast mode, diff preview, and security guard are online.</div>
+        <div class="line"><span class="time">[15:15:32]</span> <span class="tag security">[SENTINEL]</span> Secret redaction guard enabled. API keys stay in environment variables.</div>
+        <div class="line"><span class="time">[15:15:58]</span> <span class="tag inputtag">[INPUT]</span> /effort fast</div>
+        <div class="line"><span class="time">[15:15:59]</span> <span class="tag system">[EFFORT]</span> FAST enabled: model=deepseek-v4-flash-free scan_files=120 tool_iters=3.</div>
+      </section>
+      <section class="panel" data-title="Diff Viewer + Agent Graph">
+        <div class="diffgrid">
+          <div class="code"><b>before</b><span class="minus">- raw scan every turn</span><span class="minus">- prompt text only</span><span class="minus">- no palette overlay</span><span class="minus">- weak context routing</span></div>
+          <div class="code"><b>after</b><span class="plus">+ cached project graph</span><span class="plus">+ chips + autocomplete</span><span class="plus">+ Ctrl+P command palette</span><span class="plus">+ token/context meter</span></div>
+        </div>
+      </section>
+    </div>
+    <div class="col middle">
+      <section class="panel files" data-title="FILES  indexed=650">
+        <div class="important">▾ Cargo.toml</div><div class="important">▾ README.md</div><div class="rs">▾ src/main.rs</div><div class="rs">▾ src/agent/mod.rs</div><div class="rs">▾ src/tui.rs</div><div class="rs">▾ src/model_catalog.rs</div><div class="doc">▾ prompts/system_prompt.md</div><div class="doc">▾ docs/TUI_PROMPT_BOX_SPEC.md</div><div class="doc">▾ docs/neon_tui_preview.html</div><div>▾ SECURITY.md</div>
+      </section>
+      <section class="panel" data-title="Tool Logs">
+        <div class="logline">● project.scan complete</div><div class="logline">● diff preview engine armed</div><div class="logline">● undo checkpoint ready</div><div class="logline">● shell safety policy active</div><div class="logline">● palette suggestions loaded</div>
+      </section>
+    </div>
+    <div class="right">
+      <section class="panel agents" data-title="AGENTS">
+        <div><span class="dot">◉</span> ECHO-1 Idle</div><div><span class="dot">●</span> NEXUS-2 Optimizing</div><div class="glow">✣ VEGA-X Orchestrator</div><div style="color:var(--red)">◆ SENTINEL Security</div>
+      </section>
+      <section class="panel" data-title="Enhanced Context Activity">
+        <div class="heat" id="heat"></div>
+        <div class="spark" id="spark"></div>
+        <div class="small">Context window: <b id="ctx">200K</b> | Scan files: <b id="scan">120</b></div>
+      </section>
+      <section class="panel" data-title="Active Tasks">
+        <div class="gauge"><label><span>Planner</span><span>28%</span></label><div class="track"><div class="fill" style="width:28%"></div></div></div>
+        <div class="gauge"><label><span>Coder</span><span>54%</span></label><div class="track"><div class="fill" style="width:54%"></div></div></div>
+        <div class="gauge"><label><span>Reviewer</span><span>72%</span></label><div class="track"><div class="fill" style="width:72%"></div></div></div>
+        <div class="gauge"><label><span>Security</span><span>39%</span></label><div class="track"><div class="fill" style="width:39%"></div></div></div>
+      </section>
+      <section class="panel router" data-title="Model Router">
+        <div class="small">provider: <b id="provider">opencode</b></div><div class="small">model: <b id="model">deepseek-v4-flash-free</b></div><div class="meter"><i id="meter"></i></div>
+      </section>
+    </div>
+  </div>
+  <div class="prompt">
+    <div class="promptleft">
+      <div class="promptbox"><span class="tag inputtag">[INPUT]</span> <span class="glow">@terminal:~/project $</span> <input class="cmd" id="cmd" value="configure_training_loop --batch_size 128 --agent_mask 111" autocomplete="off" spellcheck="false"><span class="cursor">█</span></div>
+      <div class="chips"><span class="small">Context:</span><span class="chip files on" data-chip="@files">● @files</span><span class="chip git on" data-chip="@git">● @git</span><span class="chip tests" data-chip="@tests">○ @tests</span><span class="chip security on" data-chip="@security">● @security</span><span class="chip docs" data-chip="@docs">○ @docs</span><span class="chip shell" data-chip="@shell">○ @shell</span></div>
+      <div class="status"><span id="status">Mode fast · Active context: repo files + git diff + risk audit</span><div class="meter"><i style="width:36%"></i></div><span>Enter submit · Tab accept · Ctrl+P palette · /effort fast|max · no secrets</span></div>
+    </div>
+    <div class="autocomplete" id="suggestions"></div>
+  </div>
+  <div class="footer"><span>Ctrl+C quit</span><span>Ctrl+P palette</span><span>Ctrl+F/G/T/S toggle chips</span><span>PageUp/PageDown history</span><span>never paste secrets</span></div>
+  <div class="palette" id="palette"><h2>Command Palette</h2><div class="plist" id="plist"></div><p class="small">Click a command or press Ctrl+P to close. This preview is fully offline and interactive.</p></div>
+</div>
+</div>
+<script>
+const qs=s=>document.querySelector(s);const qsa=s=>[...document.querySelectorAll(s)];
+const commands=[
+ ['/effort fast','flash latency + fast model'],['/effort balanced','default coding mode'],['/effort deep','more repo inspection + tests'],['/effort max','huge context profile'],['/provider opencode','OpenCode Zen endpoint'],['/provider nvidia','NVIDIA NIM endpoint'],['/model deepseek-v4-flash-free','200K fast OpenCode'],['/model mimo-v2.5-free','1M OpenCode context'],['/model big-pickle','200K OpenCode model'],['/model z-ai/glm-5.2','1M NVIDIA GLM'],['/model deepseek-ai/deepseek-v4-pro','1M NVIDIA coding'],['/model stepfun-ai/step-3.7-flash','200K NVIDIA flash'],['@files summarize architecture','attach repo tree'],['@git review current diff','diff-aware review'],['@tests run safe verification','safe test plan'],['@security audit commands','risk and secret audit']
+];
+function renderHeat(){const heat=qs('#heat');heat.innerHTML='';for(let i=0;i<72;i++){const c=document.createElement('span');c.className='cell c'+((i%7)+1);c.style.animationDelay=(i*.025)+'s';heat.appendChild(c)}const spark=qs('#spark');spark.innerHTML='';for(let i=0;i<20;i++){const b=document.createElement('span');b.className='bar';b.style.height=(10+Math.round(Math.abs(Math.sin(i))*32))+'px';b.style.animationDelay=(i*.08)+'s';spark.appendChild(b)}}
+function activeChips(){return qsa('.chip.on').map(c=>c.dataset.chip)}
+function updateSuggestions(){const q=qs('#cmd').value.toLowerCase();const box=qs('#suggestions');box.innerHTML='';commands.filter(([c,d])=>!q||c.toLowerCase().includes(q)||d.toLowerCase().includes(q)||q.startsWith('/')&&c.startsWith('/')||q.startsWith('@')&&c.startsWith('@')).slice(0,8).forEach(([c,d],i)=>{const div=document.createElement('div');div.className='suggest'+(i==0?' active':'');div.innerHTML=`<b>${i==0?'▶':' '}</b><span>${c}<small>${d}</small></span>`;div.onclick=()=>{qs('#cmd').value=c;updateSuggestions()};box.appendChild(div)})}
+function addHistory(tag,cls,text){const h=qs('#history');const now=new Date().toTimeString().slice(0,8);const div=document.createElement('div');div.className='line';div.innerHTML=`<span class="time">[${now}]</span> <span class="tag ${cls}">[${tag}]</span> ${text}`;h.appendChild(div);h.scrollTop=h.scrollHeight}
+function applyCommand(cmd){if(cmd.startsWith('/effort ')){const mode=cmd.split(/\s+/)[1];let model='deepseek-v4-flash-free',ctx='200K',scan='120',w='36%';if(mode==='max'){model='mimo-v2.5-free';ctx='1M';scan='2000';w='78%'}else if(mode==='deep'){model='big-pickle';ctx='200K';scan='900';w='58%'}else if(mode==='balanced'){model='big-pickle';ctx='200K';scan='300';w='46%'}qs('#headEffort').textContent=`effort=${mode} ctx=${ctx}`;qs('#model').textContent=model;qs('#headModel').textContent=`${qs('#provider').textContent}:${model}`;qs('#ctx').textContent=ctx;qs('#scan').textContent=scan;qs('#meter').style.width=w;qs('#status').textContent=`Mode ${mode} · Active context: ${activeChips().join(' + ')||'none'}`;addHistory('EFFORT','system',`${mode.toUpperCase()} enabled: model=${model} scan_files=${scan}.`)}else if(cmd.startsWith('/provider ')){const p=cmd.split(/\s+/)[1];qs('#provider').textContent=p;qs('#headModel').textContent=`${p}:${qs('#model').textContent}`;addHistory('SYSTEM','system',`Provider switched to ${p}`)}else if(cmd.startsWith('/model ')){const m=cmd.replace('/model ','');qs('#model').textContent=m;qs('#headModel').textContent=`${qs('#provider').textContent}:${m}`;addHistory('SYSTEM','system',`Model switched to ${m}`)}else addHistory('AIA','aia','Prompt accepted by neon composer with chips: '+activeChips().join(' '))}
+qsa('.chip').forEach(ch=>ch.onclick=()=>{ch.classList.toggle('on');ch.textContent=(ch.classList.contains('on')?'● ':'○ ')+ch.dataset.chip;qs('#status').textContent=`Active context: ${activeChips().join(' + ')||'none'}`});
+qs('#cmd').addEventListener('input',updateSuggestions);qs('#cmd').addEventListener('keydown',e=>{if(e.key==='Enter'){const v=qs('#cmd').value.trim();if(!v)return;addHistory('INPUT','inputtag',v);applyCommand(v);qs('#cmd').value='';updateSuggestions()}if(e.key==='Tab'){e.preventDefault();const first=qs('.suggest span');if(first){qs('#cmd').value=first.childNodes[0].textContent;updateSuggestions()}}});
+document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='p'){e.preventDefault();qs('#palette').classList.toggle('show')}});
+function renderPalette(){const p=qs('#plist');p.innerHTML='';commands.slice(0,12).forEach(([c,d])=>{const it=document.createElement('div');it.className='pitem';it.innerHTML=`<b>${c}</b><br><span class="small">${d}</span>`;it.onclick=()=>{qs('#cmd').value=c;qs('#palette').classList.remove('show');updateSuggestions()};p.appendChild(it)})}
+renderHeat();renderPalette();updateSuggestions();
+</script>
+</body>
+</html>

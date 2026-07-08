@@ -1,0 +1,29 @@
+provider = "opencode"
+model = "deepseek-v4-flash-free"
+effort = "fast"
+project_root = "."
+system_prompt_path = "prompts/system_prompt.md"
+auto_apply = false
+max_tool_iterations = 3
+context_scan_files = 120
+max_output_tokens = 200000
+request_timeout_secs = 4000
+temperature = 0.12
+
+[openai]
+base_url = "https://api.openai.com/v1"
+
+[openrouter]
+base_url = "https://openrouter.ai/api/v1"
+
+[opencode]
+# Full endpoint is allowed; AIA will not append /chat/completions twice.
+base_url = "https://opencode.ai/zen/v1/chat/completions"
+# api_key = "use OPENCODE_API_KEY env instead"
+
+[nvidia]
+base_url = "https://integrate.api.nvidia.com/v1"
+# api_key = "use NVIDIA_API_KEY env instead"
+
+[ollama]
+base_url = "http://localhost:11434"
