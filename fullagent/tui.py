@@ -241,6 +241,7 @@ SLASH_COMMANDS = [
     ("/focus", "deep-work mode — /focus <1-20> auto-continues until done"),
     ("/render", "toggle rendered-markdown replies — /render [on|off]"),
     ("/workflow", "saved pipelines — /workflow [list|run <name>|delete <name>]"),
+    ("/flake", "hunt flaky tests — /flake [tests-dir] [sweeps] · names the polluter"),
     ("/export", "enterprise audit report — /export [md|html]"),
     ("/forecast", "projection from measured velocity + usage"),
     ("/health", "provider health — model errors + failovers"),
@@ -1340,6 +1341,8 @@ class UI:
             self._cmd_graph(arg)
         elif cmd == "/coverage":
             self.print_info(self.agent.coverage.format_status(), C["cyan"])
+        elif cmd == "/flake":
+            self._cmd_flake(arg)
         elif cmd == "/fuzz":
             self.print_info(self.agent.fuzzer.format_status(), C["yellow"])
         elif cmd == "/mutate":
@@ -2616,6 +2619,48 @@ class UI:
             return
         self.print_error("usage: /graph [index <path>|query <name>|"
                          "impact <name>]")
+
+    def _cmd_flake(self, arg: str) -> None:
+        """Hunt flaky tests: /flake [tests-dir] [sweeps].
+
+        Runs the suite repeatedly IN DIFFERENT ORDERS, separates
+        genuinely non-deterministic tests from order-dependent ones, and
+        bisects the latter to name the test that actually broke them."""
+        from pathlib import Path as _Path
+        from .flake import FlakeHunter, UnittestRunner
+
+        parts = arg.split()
+        start_dir = parts[0] if parts else "tests"
+        try:
+            sweeps = int(parts[1]) if len(parts) > 1 else 8
+        except ValueError:
+            self.print_error("usage: /flake [tests-dir] [sweeps]")
+            return
+        sweeps = max(2, min(sweeps, 40))
+
+        root = _Path.cwd()
+        if not (root / start_dir).is_dir():
+            self.print_error(f"no test directory at {root / start_dir}")
+            return
+
+        runner = UnittestRunner(root, start_dir=start_dir)
+        self.print_info(f"discovering tests under {start_dir}/ …",
+                        C["dim"])
+        tests = runner.discover()
+        if not tests:
+            self.print_error(f"discovered no tests under {start_dir}/")
+            return
+
+        self.print_info(f"hunting: {len(tests)} test(s) × {sweeps} "
+                        f"shuffled sweep(s) — this runs the suite for "
+                        f"real", C["accent"])
+        hunter = FlakeHunter(self.agent.log, runner,
+                             swarm=self.agent._ensure_crew().swarm)
+        report = hunter.hunt(tests, sweeps=sweeps)
+        colour = C["yellow"] if report.suspects else C["green"]
+        self.print_info(report.format(), colour)
+        self.print_info(f"seed {report.seed} — pass it to replay this "
+                        f"exact hunt", C["dim"])
 
     def _cmd_mutate(self, arg: str) -> None:
         """Mutation testing: /mutate <file> <suite-command>. Runs the suite

@@ -183,6 +183,32 @@ python main.py
   may be incomplete, and the agent is told to either say so or continue
   that subagent with its context intact — never to present a partial
   finding as a settled one.
+- **Flake hunter** (`/flake`) — "it passes on my machine", answered with a
+  name instead of a shrug. Most flakes are not random, they are
+  **order-dependent**: another test leaves a global, a monkeypatch, a
+  stale singleton, and the victim fails only when that test ran first —
+  so rerunning the victim alone passes forever and teaches you nothing.
+  Worse, a fixed-order sweep can never see it: the polluter runs first
+  every time, the victim fails every time, and the verdict looks
+  unanimous. So the hunt runs the suite many times **in shuffled orders,
+  in parallel**, separates genuinely non-deterministic tests from
+  order-dependent ones, and then **delta-debugs** (Zeller's ddmin)
+  everything that ran before the victim until only the tests that
+  actually matter are left. The output is not "flaky" — it is a polluter
+  by name and a command that reproduces it, path setup included:
+
+  ```
+  ✗ test_demo.TestVictim.test_expects_default_mode  [order-dependent]  fails 60%
+    reproduce with:
+      cd /proj && PYTHONPATH=/proj/tests python3 -m unittest \
+        test_demo.TestConfig.test_override_mode \
+        test_demo.TestVictim.test_expects_default_mode
+    test_demo.TestConfig.test_override_mode leaves state that breaks it
+  ```
+
+  Every run is a fresh process (reusing an interpreter would hide the
+  very state leakage being hunted), and the hunt is seeded, so it
+  replays exactly.
 - **Blackboard** — the thing that makes parallel subagents a *team*.
   Coalescing removes duplicated calls; it cannot remove duplicated
   *knowledge*, and the expensive duplication is not "both ran the same
@@ -364,6 +390,7 @@ fullagent/
   goal.py          goal contracts with machine-checkable done-criteria
   judge.py         deterministic verification predicates (no LLM judging)
   team.py          shared subagent substrate — roles, reports, retry, global write lock
+  flake.py         flaky-test hunter — shuffled parallel sweeps + delta debugging
   swarm.py         adaptive parallel substrate — load governor, elastic pool, net/cpu permits, AIMD window, coalescing
   orchestra.py     the Mastermind arranging a batch — sealed briefs, conflict-free waves
   crew.py          persistent Codex-style subagents — parallel on the swarm, writes serialised

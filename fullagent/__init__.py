@@ -20,6 +20,8 @@ Package layout:
                     + conflict-free waves, sealed into the event log
     blackboard.py   shared findings — what one subagent establishes, the
                     rest are handed, once, deduped and bounded
+    flake.py        flaky-test hunter — shuffled parallel sweeps, then
+                    delta debugging to NAME the polluting test
     crew.py         persistent Codex-style subagents (spawn/send/wait/
                     close/resume/forget) — PARALLEL execution on the
                     swarm, writes still serialised (invariant I7)

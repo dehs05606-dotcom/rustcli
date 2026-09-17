@@ -68,6 +68,7 @@ from .cov import CoverageEngine
 from .daemon import Daemon
 from .dashboard import Dashboard
 from .forge import Forge
+from .flake import FlakeHunter, UnittestRunner
 from .fuzz import Fuzzer
 from .goal import GoalContract
 from .healer import Healer
@@ -354,6 +355,7 @@ class Agent:
         self._register_v4_tools()
         self._register_advanced_tools()
         self._register_crew_tools()
+        self._register_flake_tools()
         self._register_persisted_skills()
 
         # cassette: record/replay model calls (FULLAGENT_CASSETTE=path,
@@ -2579,6 +2581,55 @@ class Agent:
                 "at": {"type": "number"}},
                 "required": ["subject", "predicate"]},
             knowledge_ask)
+
+    def _register_flake_tools(self) -> None:
+        """Give the model the flake hunt.
+
+        "It passes on my machine" is answered here with a name and a
+        pasteable command, not a shrug — see flake.py for why ordering
+        is the question that matters.
+        """
+        def hunt_flakes(start_dir: str = "tests", sweeps: int = 8,
+                        solo: int = 6, pattern: str = "test*.py") -> str:
+            try:
+                sweeps = int(clamp(int(sweeps), 2, 40))
+                solo = int(clamp(int(solo), 1, 20))
+            except (TypeError, ValueError):
+                sweeps, solo = 8, 6
+            root = Path.cwd()
+            if not (root / str(start_dir)).is_dir():
+                return (f"ERROR: no test directory at "
+                        f"{root / str(start_dir)}")
+            runner = UnittestRunner(root, start_dir=str(start_dir),
+                                    pattern=str(pattern))
+            tests = runner.discover()
+            if not tests:
+                return (f"ERROR: discovered no tests under {start_dir} "
+                        f"(pattern {pattern})")
+            self._push_status(
+                f"🎲 flake hunt · {len(tests)} tests × {sweeps} sweeps")
+            hunter = FlakeHunter(self.log, runner,
+                                 swarm=self._ensure_crew().swarm)
+            return hunter.hunt(tests, sweeps=sweeps, solo=solo).format()
+
+        self.tools["hunt_flakes"] = Tool(
+            "hunt_flakes",
+            "Find tests that pass sometimes and fail other times, and "
+            "say WHY. Runs the suite many times in parallel IN DIFFERENT "
+            "ORDERS (an order-dependent flake is invisible to repeated "
+            "runs of one order), separates genuinely non-deterministic "
+            "tests from order-dependent ones, and for each "
+            "order-dependent failure bisects the tests that ran before "
+            "it to name the exact polluter, with a command that "
+            "reproduces it. Use this whenever a test is described as "
+            "flaky, intermittent, or 'only fails on CI'.",
+            {"type": "object", "properties": {
+                "start_dir": {"type": "string"},
+                "sweeps": {"type": "integer"},
+                "solo": {"type": "integer"},
+                "pattern": {"type": "string"}},
+                "required": []},
+            hunt_flakes, risk=RISK_CONFIRM)
 
     def _register_crew_tools(self) -> None:
         """Give the model its own hands on the parallel Crew.
