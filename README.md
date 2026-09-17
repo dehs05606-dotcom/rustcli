@@ -183,6 +183,33 @@ python main.py
   may be incomplete, and the agent is told to either say so or continue
   that subagent with its context intact — never to present a partial
   finding as a settled one.
+- **Concurrency model checker** (`interleave.py`) — the parallel
+  machinery is no longer trusted because its tests pass. A passing
+  concurrency test says *one* interleaving worked, and the scheduler
+  chose it, not you. So the scheduler's discretion is removed: threads
+  under test run one at a time and a strategy decides who runs next at
+  every synchronisation point, which turns "did we get lucky" into a
+  search. The strategy is **PCT** (Burckhardt et al., ASPLOS'10) — random
+  thread priorities plus *d−1* randomly placed priority drops — which
+  buys a real lower bound of 1/(n·k^(d−1)) on finding a depth-*d* bug,
+  where random scheduling gives no bound at all. Every finding comes back
+  with its **schedule**, and the same schedule replays the same execution
+  exactly, so a race becomes a regression test instead of an anecdote.
+
+  It earned its keep immediately: pointed at its own condition variable
+  it found a **lost wakeup** (publish the waiter *after* releasing the
+  lock, and a notify landing in that window is delivered to nobody), and
+  it twice caught test scenarios whose observer thread could simply be
+  scheduled first and report a failure that never happened. The real
+  `Coalescer`, `AdaptiveSemaphore` and `Blackboard` are now verified
+  across hundreds of distinct schedules each — code under test is
+  instrumented by swapping its `threading` module, so nothing is
+  rewritten for the checker's benefit.
+
+  It controls scheduling at synchronisation points, not between arbitrary
+  bytecodes, so an unsynchronised data race with no lock anywhere near it
+  can still slip through. That limit is stated because a verification
+  tool that overstates its coverage is worse than none.
 - **Flake hunter** (`/flake`) — "it passes on my machine", answered with a
   name instead of a shrug. Most flakes are not random, they are
   **order-dependent**: another test leaves a global, a monkeypatch, a
@@ -390,6 +417,7 @@ fullagent/
   goal.py          goal contracts with machine-checkable done-criteria
   judge.py         deterministic verification predicates (no LLM judging)
   team.py          shared subagent substrate — roles, reports, retry, global write lock
+  interleave.py    deterministic concurrency model checker — PCT search, exact replay
   flake.py         flaky-test hunter — shuffled parallel sweeps + delta debugging
   swarm.py         adaptive parallel substrate — load governor, elastic pool, net/cpu permits, AIMD window, coalescing
   orchestra.py     the Mastermind arranging a batch — sealed briefs, conflict-free waves

@@ -22,6 +22,9 @@ Package layout:
                     rest are handed, once, deduped and bounded
     flake.py        flaky-test hunter — shuffled parallel sweeps, then
                     delta debugging to NAME the polluting test
+    interleave.py   deterministic concurrency model checker — controls
+                    the scheduler, searches interleavings (PCT), and
+                    replays any race it finds, exactly
     crew.py         persistent Codex-style subagents (spawn/send/wait/
                     close/resume/forget) — PARALLEL execution on the
                     swarm, writes still serialised (invariant I7)
