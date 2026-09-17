@@ -1,8 +1,10 @@
-/target/
-/.aia/
-.env
-.env.*
-!.env.example
-*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
 .DS_Store
-run.txt
+build/
+dist/
+.bg-shell/
+.gsd/
