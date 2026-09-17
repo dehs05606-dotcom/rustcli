@@ -329,6 +329,8 @@ class Agent:
         # live status pipe for the current turn (set in run_turn) — lets
         # long-running tools (crew) stream progress into the UI border
         self._turn_status: Callable[[str], None] | None = None
+        # the live multi-line relay (same one the shell tools stream on)
+        self._turn_output: Callable[[str, str], None] | None = None
         # Focus Mode (deep work): distance history drives stall detection
         self._focus_history: list[float] = []
         # enterprise extras
@@ -586,6 +588,7 @@ class Agent:
 
         iterations = 0
         self._turn_status = on_status
+        self._turn_output = on_tool_output
         try:
             while iterations < config.MAX_TOOL_ITERATIONS:
                 iterations += 1
@@ -699,6 +702,7 @@ class Agent:
             self.log.append("turn.cancelled", {})
 
         self._turn_status = None
+        self._turn_output = None
         turn.duration = time.time() - started
         try:
             self._score_turn(turn)
@@ -1884,13 +1888,102 @@ class Agent:
             # is knowledge rather than an identical call.
             crew = Crew(self.log, self.provider, self.model, self.effort,
                         mastermind=self.mastermind,
-                        board=Blackboard(self.log))
+                        board=Blackboard(self.log),
+                        observer=self._crew_watcher())
             self._crew = crew
         # a mid-session model or effort switch must reach subagents
         # spawned after it — the Crew reads these on every dispatch
         crew.provider, crew.model, crew.effort = (
             self.provider, self.model, self.effort)
         return crew
+
+    # -- watching the crew work --------------------------------------------
+
+    def _crew_watcher(self) -> "Callable[[str, dict], None]":
+        """Turn crew events into lines the person watching can read.
+
+        A parallel batch used to be a spinner and a rising number of
+        seconds. Eight subagents can be working hard or hung, and from
+        the outside those look identical — which is not a cosmetic
+        problem, it is the difference between waiting patiently and
+        killing a turn that was two seconds from finishing.
+
+        Lines go out through the same relay the shell tools stream on, so
+        they appear AS THEY HAPPEN rather than in a summary afterwards.
+        """
+        def watch(kind: str, ev: dict) -> None:
+            icon = ev.get("icon", "◆")
+            who = f"{ev.get('nickname', ev.get('id', '?')):<7}"
+            if kind == "spawn":
+                self._emit_crew_line(
+                    f"{icon} {who} ▸ {str(ev.get('task', ''))[:70]}")
+            elif kind == "tool":
+                if ev.get("tool") == "share_finding":
+                    return          # the ◆ line below says it better
+                detail = ev.get("detail", "")
+                self._emit_crew_line(
+                    f"{icon} {who} · {ev.get('tool', '')}"
+                    + (f" {detail}" if detail else ""))
+            elif kind == "finding":
+                self._emit_crew_line(
+                    f"◆ {who} shares: {str(ev.get('text', ''))[:80]}")
+            elif kind == "done":
+                state = ev.get("state", "")
+                mark = {"done": "✓", "blocked": "◐",
+                        "error": "✗"}.get(state, "·")
+                secs = ev.get("elapsed_ms", 0) / 1000.0
+                tail = (ev.get("summary") or ev.get("error") or "")
+                if ev.get("stopped_by"):
+                    tail = f"[partial — {ev['stopped_by']}] {tail}"
+                self._emit_crew_line(
+                    f"{mark} {who} {secs:.0f}s · {ev.get('tools', 0)} tools"
+                    + (f" · {ev['reused']} reused" if ev.get("reused")
+                       else "")
+                    + (f" — {str(tail).splitlines()[0][:70]}" if tail
+                       else ""))
+            self._refresh_crew_status()
+
+        return watch
+
+    def _emit_crew_line(self, line: str) -> None:
+        cb = getattr(self, "_turn_output", None)
+        if cb is None:
+            self._push_status(line[:90])
+            return
+        try:
+            cb(line, "crew")
+        except Exception:  # noqa: BLE001 — the UI is never load-bearing
+            pass
+
+    def _refresh_crew_status(self) -> None:
+        """One line in the border: how many are left, and what they are on.
+
+        Deliberately an AGGREGATE rather than a scroll of the last event.
+        The question a person has while waiting is "is this moving and
+        how much is left", which no single event answers.
+        """
+        crew = getattr(self, "_crew", None)
+        if crew is None:
+            return
+        agents = [a for a in crew.list() if a.state != "closed"]
+        if not agents:
+            return
+        running = [a for a in agents if a.state == "running"]
+        done = len(agents) - len(running)
+        busy = " ".join(f"{a.nickname}:{a.doing}"
+                        for a in running[:3] if a.doing)
+        board = getattr(crew, "board", None)
+        shared = board.snapshot()["facts"] if board is not None else 0
+        # "running" on the roster covers both actually-executing and
+        # waiting-for-a-thread. Showing them as one number makes a queued
+        # batch look stalled, so they are counted apart.
+        in_flight = min(len(running), crew.swarm.max_parallel)
+        queued = max(0, len(running) - in_flight)
+        self._push_status(
+            f"⚡ crew {done}/{len(agents)} done"
+            + (f" · {queued} queued" if queued else "")
+            + (f" · {busy}" if busy else "")
+            + (f" · {shared} shared" if shared else ""))
 
     def _invalidate_shared_caches(self, tool_name: str) -> None:
         """A write happened here; drop every cache that describes the
@@ -2009,12 +2102,9 @@ class Agent:
             if not live:
                 continue
             if len(plan.waves) > 1:
-                self._push_status(
-                    f"⚡ wave {wave.index + 1}/{len(plan.waves)} · "
-                    f"{len(live)} subagent(s) in parallel")
-            else:
-                self._push_status(
-                    f"⚡ {len(live)} subagent(s) working in parallel")
+                self._emit_crew_line(
+                    f"── wave {wave.index + 1}/{len(plan.waves)} · "
+                    f"{len(live)} subagent(s) in parallel ──")
             crew.wait([a.id for _, a in live], timeout=left,
                       should_cancel=self._cancel_flag.is_set,
                       straggler=STRAGGLER_FACTOR)

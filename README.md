@@ -236,6 +236,32 @@ python main.py
   Every run is a fresh process (reusing an interpreter would hide the
   very state leakage being hunted), and the hunt is seeded, so it
   replays exactly.
+- **You can see it working.** A parallel batch used to be a spinner and a
+  rising number of seconds — eight subagents busy and eight subagents hung
+  look identical from outside, which is the difference between waiting and
+  killing a turn that was two seconds from finishing. Every subagent now
+  reports its task, each tool call with the path or pattern it is on, each
+  finding as it is shared, and its verdict with time and tool count — live,
+  as it happens:
+
+  ```
+   ⚡ spawn_agents
+   │ 🔎 nova    ▸ audit client.py retry paths
+   │ 🔎 atlas   ▸ map event-log writers
+   │ 🔎 nova    · read_file fullagent/client.py
+   │ 🔎 atlas   · search_files log.append
+   │ ◆ nova    shares: retries swallow 429 — see chat_with_retry
+   │ ✓ atlas   4s · 3 tools — every writer goes through log.append
+   │ ✓ nova    6s · 4 tools · 1 reused — retry path can mask a 429
+  ```
+
+  and the border always answers the only question a person has while
+  waiting — how much is left, and is it moving:
+  `⚡ crew 5/8 done · 2 queued · echo:read_file lyra:grep · 3 shared`
+
+  Roster size and concurrency are also no longer the same number. Spawn as
+  many subagents as the work divides into; the swarm runs its limit at a
+  time and the rest queue, visibly. No more "spawn eight, wait, spawn four".
 - **Blackboard** — the thing that makes parallel subagents a *team*.
   Coalescing removes duplicated calls; it cannot remove duplicated
   *knowledge*, and the expensive duplication is not "both ran the same

@@ -301,6 +301,80 @@ class BatchTests(unittest.TestCase):
                                     "role": "researcher"})
         self.assertIn("[partial", out["summary"])
 
+    def test_a_parallel_batch_is_visible_while_it_runs(self):
+        # Eight subagents used to be a spinner and a rising number of
+        # seconds: working hard and hung look identical from outside,
+        # which is the difference between waiting and killing a turn two
+        # seconds from done.
+        lines, status = [], []
+
+        def chat(provider, model, effort, messages, schemas, timeout):
+            if any(m.get("role") == "tool" for m in messages):
+                return reply("STATUS: DONE\nSUMMARY: looked at it")
+            return SimpleNamespace(
+                content="", reasoning="",
+                tool_calls=[{"id": "c", "function": {
+                    "name": "read_file",
+                    "arguments": '{"path": "fullagent/swarm.py"}'}}],
+                finish_reason="tool_calls",
+                usage={"prompt_tokens": 5, "completion_tokens": 2})
+
+        agent = self.make_agent(chat)
+        agent._turn_output = lambda line, stream: lines.append((stream, line))
+        agent._turn_status = status.append
+        agent._run_workers(
+            [{"task": f"investigate area {i}", "role": "researcher"}
+             for i in range(3)], timeout=60)
+
+        self.assertTrue(lines, "a parallel batch produced no live output")
+        self.assertTrue(all(s == "crew" for s, _ in lines))
+        text = "\n".join(l for _, l in lines)
+
+        # every subagent announced its task, its tool, and its verdict
+        for i in range(3):
+            self.assertIn(f"investigate area {i}", text)
+        self.assertIn("read_file fullagent/swarm.py", text)
+        self.assertEqual(text.count("✓"), 3, text)
+
+        # and the border always said how far along the batch was
+        self.assertTrue(any("crew 3/3 done" in s for s in status), status)
+
+    def test_a_shared_finding_is_announced_once(self):
+        lines = []
+
+        def chat(provider, model, effort, messages, schemas, timeout):
+            if any(m.get("role") == "tool" for m in messages):
+                return reply("STATUS: DONE\nSUMMARY: done")
+            return SimpleNamespace(
+                content="", reasoning="",
+                tool_calls=[{"id": "c", "function": {
+                    "name": "share_finding",
+                    "arguments": '{"finding": "config lives in config.py"}'}}],
+                finish_reason="tool_calls",
+                usage={"prompt_tokens": 5, "completion_tokens": 2})
+
+        agent = self.make_agent(chat)
+        agent._turn_output = lambda line, stream: lines.append(line)
+        agent._run_workers([{"task": "scout", "role": "researcher"}],
+                           timeout=60)
+
+        text = "\n".join(lines)
+        self.assertIn("shares: config lives in config.py", text)
+        # announced by the ◆ line only — not also as a raw tool call
+        self.assertEqual(text.count("config lives in config.py"), 1, text)
+
+    def test_the_watcher_never_takes_a_subagent_down(self):
+        # the UI is never load-bearing
+        def boom(line, stream):
+            raise RuntimeError("the terminal exploded")
+
+        agent = self.make_agent(
+            lambda *a: reply("STATUS: DONE\nSUMMARY: fine"))
+        agent._turn_output = boom
+        reports = agent._run_workers(
+            [{"task": "still works", "role": "researcher"}], timeout=60)
+        self.assertEqual(reports[0].status, "done", reports[0].error)
+
     def test_the_legacy_alias_still_works(self):
         agent = self.make_agent(
             lambda *a: reply("STATUS: DONE\nSUMMARY: ok"))

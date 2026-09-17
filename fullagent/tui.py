@@ -2760,6 +2760,15 @@ class UI:
         shell_live = {"active": False, "streamed": False, "lines": 0}
 
         def on_tool_output(line: str, stream: str):
+            if stream == "crew":
+                # Subagent progress. Printed unconditionally and without
+                # the flood guard's line budget, because this IS the
+                # answer to "what are the eight of them doing" — the
+                # question the old spinner left a person staring at for
+                # minutes with no way to tell work from a hang.
+                self.console.print(
+                    Text(" │ " + line, style=C["accent"]), soft_wrap=True)
+                return
             if not shell_live["active"]:
                 return
             n = shell_live["lines"]
@@ -2905,6 +2914,11 @@ class UI:
             if rem:
                 self.console.print(Text(rem), soft_wrap=True)
             shell_live["active"] = ev.name in ("run_command", "live_shell")
+            if ev.name in ("spawn_agents", "wait_for_agents",
+                           "send_to_agent"):
+                self.console.print(
+                    Text(f" ⚡ {ev.name}", style=C["accent"]),
+                    soft_wrap=True)
             shell_live["streamed"] = False
             shell_live["lines"] = 0
             if ev.name not in ("write_file", "edit_file", "apply_patch"):

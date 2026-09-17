@@ -70,7 +70,14 @@ from .blackboard import Blackboard
 from .swarm import CPU_CEILING, Swarm
 from .tools import Tool, build_registry, parse_tool_arguments
 
-MAX_AGENTS = MAX_WORKERS   # roster ceiling (queued + active agents)
+# ROSTER size and CONCURRENCY are different numbers, and conflating them
+# is what made a twelve-task batch turn into "spawn eight, wait, spawn
+# four" — a dance the person watching has to sit through for no reason.
+# How many subagents run AT ONCE is the swarm's job (MAX_PARALLEL, and
+# under that the load governor). How many may sit on the roster is only a
+# memory question: each one holds its conversation until it is forgotten.
+# So the roster is generous and the concurrency is metered.
+MAX_AGENTS = 32            # roster ceiling — spawned, however few run
 MAX_PARALLEL = MAX_WORKERS  # how many subagents may be in flight at once
 MAX_SEND_STEPS = 40        # tool-loop budget per follow-up message
 # wait() is zero-spin: it parks on a Condition that a finishing worker
@@ -135,6 +142,24 @@ _CALLSIGNS = ("nova", "atlas", "echo", "lyra", "orion", "vega", "iris",
 
 AGENT_STATES = ("running", "done", "blocked", "error", "closed")
 
+
+def _tool_detail(name: str, args: dict) -> str:
+    """The one argument a reader actually wants to see.
+
+    A live line has room for a path or a pattern, not a JSON blob. Which
+    field matters depends entirely on the tool, and showing the wrong one
+    ("content: 4000 chars") is worse than showing nothing, so this picks
+    per tool and gives up quietly when nothing fits."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("path", "pattern", "query", "command", "url", "finding",
+                "name"):
+        value = args.get(key)
+        if value:
+            text = str(value).replace("\n", " ").strip()
+            return text[:60] + ("…" if len(text) > 60 else "")
+    return ""
+
 _ROLE_ICON = {"researcher": "🔎", "coder": "👨‍💻", "tester": "🧪",
               "reviewer": "🧐", "analyst": "📊", "architect": "🏛️",
               "debugger": "🐞", "optimizer": "⚡", "refactorer": "🧹",
@@ -158,6 +183,7 @@ class CrewAgent:
     tool_calls: int = 0
     reused: int = 0             # tool calls answered without re-running
     stopped_by: str = ""        # "" | "loop" | "deadline" — why it wrapped up
+    doing: str = ""             # the tool it is running right now
     shared: int = 0             # findings this subagent gave the crew
     learned: int = 0            # findings it was handed by its peers
     board_cursor: int = 0       # how far it has read the shared board
@@ -248,7 +274,9 @@ class Crew:
                  chat=None, max_parallel: int = MAX_PARALLEL,
                  cpu_ceiling: int = CPU_CEILING, swarm: Swarm | None = None,
                  straggler_min_grace: float = STRAGGLER_MIN_GRACE,
-                 board: "Blackboard | None" = None) -> None:
+                 board: "Blackboard | None" = None,
+                 observer: "Callable[[str, dict], None] | None" = None
+                 ) -> None:
         self.log = log
         self.provider = provider
         self.model = model
@@ -260,6 +288,13 @@ class Crew:
         # hands it to the rest. Optional so the Crew stays usable — and
         # testable — with no collaboration at all.
         self.board = board
+        # Live progress. Without it a parallel batch is a spinner and a
+        # number of seconds: eight subagents working hard and the person
+        # who asked for them staring at nothing, unable to tell a busy
+        # crew from a hung one. The observer is called from WORKER
+        # threads, so whatever it does must be cheap and must never
+        # raise — see _tell.
+        self.observer = observer
         # the floor on a straggler's grace: no batch, however quick, may
         # guillotine a subagent that simply drew a harder task
         self.straggler_min_grace = max(0.0, float(straggler_min_grace))
@@ -294,6 +329,16 @@ class Crew:
             self._chat = functools.partial(
                 chat_with_retry,
                 on_rate_limit=lambda _e: self.swarm.net_window.penalize())
+
+    def _tell(self, kind: str, **payload) -> None:
+        """Report progress to whoever is watching. Never raises: a UI
+        that throws must not take a subagent down with it."""
+        if self.observer is None:
+            return
+        try:
+            self.observer(kind, payload)
+        except Exception:  # noqa: BLE001 — the UI is never load-bearing
+            pass
 
     def _notify_settled(self) -> None:
         """Wake everything blocked in wait(). Never called while holding
@@ -348,9 +393,12 @@ class Crew:
                        if a.state == "running")
             if live >= self.max_agents:
                 raise CrewError(
-                    f"crew is at capacity ({self.max_agents} agents "
-                    f"queued/running) — wait for one to finish or close "
-                    f"one")
+                    f"the roster is full ({self.max_agents} subagents "
+                    f"still live) — close or forget some first. Note this "
+                    f"is NOT a concurrency limit: spawn as many as the "
+                    f"work divides into, and the swarm runs "
+                    f"{self.swarm.max_parallel} at a time while the rest "
+                    f"queue")
             self._counter += 1
             agent_id = f"crew-{self._counter}"
             nickname = str(name or "").strip() or next(self._names)
@@ -375,6 +423,8 @@ class Crew:
                                      systemprompt.worker(role, self.max_agents))
         agent.messages.append({"role": "user", "content": user})
 
+        self._tell("spawn", id=agent.id, nickname=agent.nickname,
+                   role=agent.role, icon=agent.icon, task=task)
         self.log.append("crew.spawn",
                         {"id": agent.id, "nickname": agent.nickname,
                          "role": role, "task": task[:300],
@@ -672,6 +722,9 @@ class Crew:
                                   nickname=agent.nickname)
             if out.startswith("OK"):
                 agent.shared += 1
+                self._tell("finding", id=agent.id,
+                           nickname=agent.nickname, icon=agent.icon,
+                           role=agent.role, text=str(finding).strip())
             return out
 
         return Tool(
@@ -854,6 +907,11 @@ class Crew:
                     args = parse_tool_arguments(fn.get("arguments"))
                     agent.tool_calls += 1
                     tool_names.append(name)
+                    agent.doing = name
+                    self._tell("tool", id=agent.id,
+                               nickname=agent.nickname, icon=agent.icon,
+                               role=agent.role, tool=name,
+                               detail=_tool_detail(name, args))
                     try:
                         signature = f"{name}:{json.dumps(args, sort_keys=True, default=str)[:400]}"
                     except (TypeError, ValueError):
@@ -958,6 +1016,12 @@ class Crew:
             agent.rearm()
             self._enqueue(agent, read_only, MAX_SEND_STEPS)
             return
+        agent.doing = ""
+        self._tell("done", id=agent.id, nickname=agent.nickname,
+                   icon=agent.icon, role=agent.role, state=agent.state,
+                   summary=agent.summary, error=agent.error,
+                   elapsed_ms=agent.elapsed_ms, tools=agent.tool_calls,
+                   reused=agent.reused, stopped_by=agent.stopped_by)
         self.log.append("crew.done", agent.to_dict(),
                         actor=f"crew:{agent.id}")
 
