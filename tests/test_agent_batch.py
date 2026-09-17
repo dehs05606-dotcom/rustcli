@@ -261,6 +261,46 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len(ran), 2,
                          "a subagent could still read the pre-write copy")
 
+    def test_a_workflow_step_runs_a_real_subagent(self):
+        # /workflow used to die on its first step: the executor was a
+        # stub returning "Crew feature has been removed", so the whole
+        # pipeline engine was dead behind a command that still looked
+        # like it worked.
+        def chat(provider, model, effort, messages, schemas, timeout):
+            return reply("STATUS: DONE\nSUMMARY: implemented the parser")
+
+        agent = self.make_agent(chat)
+        out = agent._workflow_step({"task": "implement the parser",
+                                    "role": "coder"})
+        self.assertEqual(out["status"], "done", out)
+        self.assertIn("implemented the parser", out["summary"])
+        self.assertNotIn("removed", out["summary"])
+
+    def test_a_workflow_step_without_a_task_is_rejected(self):
+        agent = self.make_agent(
+            lambda *a: reply("STATUS: DONE\nSUMMARY: ok"))
+        out = agent._workflow_step({"role": "coder"})
+        self.assertEqual(out["status"], "error")
+
+    def test_a_partial_workflow_step_says_so(self):
+        def chat(provider, model, effort, messages, schemas, timeout):
+            last = next((m["content"] for m in reversed(messages)
+                         if m.get("role") == "user"), "")
+            if "Reply NOW" in last:
+                return reply("STATUS: DONE\nSUMMARY: got partway")
+            return SimpleNamespace(
+                content="", reasoning="",
+                tool_calls=[{"id": "c", "function": {
+                    "name": "file_info",
+                    "arguments": '{"path": "/same"}'}}],
+                finish_reason="tool_calls",
+                usage={"prompt_tokens": 2, "completion_tokens": 1})
+
+        agent = self.make_agent(chat)
+        out = agent._workflow_step({"task": "go in circles",
+                                    "role": "researcher"})
+        self.assertIn("[partial", out["summary"])
+
     def test_the_legacy_alias_still_works(self):
         agent = self.make_agent(
             lambda *a: reply("STATUS: DONE\nSUMMARY: ok"))

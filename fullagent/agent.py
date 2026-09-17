@@ -1388,8 +1388,32 @@ class Agent:
     # -- enterprise: workflows ----------------------------------------------------
 
     def _workflow_step(self, item: dict) -> dict:
-        """Crew feature removed — returns error."""
-        return {"status": "error", "summary": "Crew feature has been removed"}
+        """Run ONE workflow step as a real subagent.
+
+        This was left as a stub returning "Crew feature has been removed"
+        when subagent execution was torn out, which meant /workflow ran
+        its first step, got an error back, and stopped — the whole
+        pipeline engine, and every saved workflow, was dead behind a
+        command that still looked like it worked.
+
+        A step is one task, so this is a batch of one: the caller owns
+        the ordering (phases), and _run_workers owns the execution."""
+        task = str(item.get("task", "") or "").strip()
+        if not task:
+            return {"status": "error", "summary": "step has no task"}
+        role = str(item.get("role", "") or "").strip() or "coder"
+        reports = self._run_workers(
+            [{"task": task, "role": role}],
+            read_only=self.autonomy <= 1)
+        if not reports:
+            return {"status": "error", "summary": "no report returned"}
+        r = reports[0]
+        summary = r.summary or r.error or ""
+        if r.stopped_by:
+            summary = f"[partial — {r.stopped_by}] {summary}"
+        return {"status": r.status, "summary": summary,
+                "files_touched": list(r.files_touched),
+                "tool_calls": r.tool_calls}
 
     def export_report(self, fmt: str = "md") -> Path:
         """Write the enterprise audit report (md or html) to the cwd."""
