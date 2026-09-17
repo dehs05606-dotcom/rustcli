@@ -66,6 +66,7 @@ from .config import PROVIDERS, model_by_id
 from .kernel import EventLog, fold
 from .team import (ROLES, DEFAULT_ROLE, MAX_WORKER_STEPS, MAX_WORKERS,
                    _WRITE_LOCK, chat_with_retry, parse_worker_final)
+from .blackboard import Blackboard
 from .swarm import CPU_CEILING, Swarm
 from .tools import Tool, build_registry, parse_tool_arguments
 
@@ -107,11 +108,25 @@ CACHEABLE_TOOLS = frozenset({
 # never replayed.
 SINGLEFLIGHT_TOOLS = frozenset({"web_search", "web_fetch"})
 # Anything here means the filesystem may have changed: drop every
-# cached read on the spot.
+# cached read on the spot. This is also the set that must hold the ONE
+# global write lock (invariant I7) — see MUTATING_TOOLS below, which is
+# the same set for the same reason.
 INVALIDATING_TOOLS = frozenset({
     "write_file", "edit_file", "create_directory", "run_command",
     "delete_path", "move_path", "copy_path",
 })
+# Tools that can change the world, and therefore must never run
+# concurrently with each other.
+#
+# Keyed on the TOOL, never on the role. A role's `writes` flag says what
+# we LABELLED it, not what it can do: tester, analyst, debugger and
+# optimizer are all writes=False and all hold run_command, which can do
+# anything at all — install packages, check out a branch, run a build
+# that rewrites the tree. Gating the lock on the role let all four of
+# them mutate the tree with no lock at all, alongside a coder that was
+# holding it. Serially that was invisible; in parallel it is a data
+# race, and the lock exists precisely to make that impossible.
+MUTATING_TOOLS = INVALIDATING_TOOLS
 
 # Codex-flavoured callsigns for the crew roster.
 _CALLSIGNS = ("nova", "atlas", "echo", "lyra", "orion", "vega", "iris",
@@ -143,6 +158,9 @@ class CrewAgent:
     tool_calls: int = 0
     reused: int = 0             # tool calls answered without re-running
     stopped_by: str = ""        # "" | "loop" | "deadline" — why it wrapped up
+    shared: int = 0             # findings this subagent gave the crew
+    learned: int = 0            # findings it was handed by its peers
+    board_cursor: int = 0       # how far it has read the shared board
     # monotonic instant after which this subagent should stop exploring
     # and report what it has. 0.0 means "no deadline".
     soft_deadline: float = 0.0
@@ -207,6 +225,7 @@ class CrewAgent:
                 "files_touched": self.files_touched[:12],
                 "tool_calls": self.tool_calls, "reused": self.reused,
                 "stopped_by": self.stopped_by,
+                "shared": self.shared, "learned": self.learned,
                 "tokens_in": self.tokens_in, "tokens_out": self.tokens_out,
                 "elapsed_ms": self.elapsed_ms}
 
@@ -228,13 +247,19 @@ class Crew:
                  mastermind=None, max_agents: int = MAX_AGENTS,
                  chat=None, max_parallel: int = MAX_PARALLEL,
                  cpu_ceiling: int = CPU_CEILING, swarm: Swarm | None = None,
-                 straggler_min_grace: float = STRAGGLER_MIN_GRACE) -> None:
+                 straggler_min_grace: float = STRAGGLER_MIN_GRACE,
+                 board: "Blackboard | None" = None) -> None:
         self.log = log
         self.provider = provider
         self.model = model
         self.effort = effort
         self.mastermind = mastermind
         self.max_agents = max(1, int(max_agents))
+        # Shared findings. Without it, eight subagents rediscover the
+        # same five facts; with it, the first one to work something out
+        # hands it to the rest. Optional so the Crew stays usable — and
+        # testable — with no collaboration at all.
+        self.board = board
         # the floor on a straggler's grace: no batch, however quick, may
         # guillotine a subagent that simply drew a harder task
         self.straggler_min_grace = max(0.0, float(straggler_min_grace))
@@ -593,9 +618,11 @@ class Crew:
             model_tag = (f" · {a.model_id}" if a.model_id
                          and a.model_id != self.model.id else "")
             reuse = f" ({a.reused} reused)" if a.reused else ""
+            team = (f" · shared {a.shared}, learned {a.learned}"
+                    if (a.shared or a.learned) else "")
             head = (f"{a.icon} [{a.id}] {a.nickname} ({a.role}) {icon} "
-                    f"{a.state} · {a.tool_calls} tools{reuse}{model_tag} · "
-                    f"{a.elapsed_ms}ms")
+                    f"{a.state} · {a.tool_calls} tools{reuse}{model_tag}"
+                    f"{team} · {a.elapsed_ms}ms")
             lines.append(head)
             lines.append(f"  task: {a.task[:200]}")
             if a.files_touched:
@@ -630,6 +657,51 @@ class Crew:
         return "\n".join(lines)
 
     # -- the worker loop ----------------------------------------------------------
+
+    def _board_tool(self, agent: CrewAgent) -> Tool:
+        """`share_finding`, bound to the subagent that will call it.
+
+        Bound per agent rather than shared, because a finding is only
+        useful to the crew if it carries WHO worked it out — an
+        anonymous board is a pile of claims nobody can weigh or follow
+        up on.
+        """
+        def share_finding(finding: str = "") -> str:
+            out = self.board.post(finding, agent_id=agent.id,
+                                  role=agent.role,
+                                  nickname=agent.nickname)
+            if out.startswith("OK"):
+                agent.shared += 1
+            return out
+
+        return Tool(
+            "share_finding",
+            "Tell the other subagents working alongside you something "
+            "you have ESTABLISHED — a path, a signature, a root cause, "
+            "a dead end worth not repeating. One fact per call, stated "
+            "so somebody who has not read your work can use it. This is "
+            "how the crew avoids discovering the same thing eight "
+            "times; share as soon as you know it, not at the end.",
+            {"type": "object",
+             "properties": {"finding": {"type": "string"}},
+             "required": ["finding"]},
+            share_finding)
+
+    def _deliver_findings(self, agent: CrewAgent) -> None:
+        """Hand this subagent whatever its peers have learned since it
+        last looked. Once each, never its own, and capped — a board
+        re-sent every turn would cost more than the duplication it
+        exists to prevent."""
+        if self.board is None:
+            return
+        fresh, cursor = self.board.since(agent.board_cursor,
+                                         exclude_agent=agent.id)
+        agent.board_cursor = cursor
+        if not fresh:
+            return
+        agent.learned += len(fresh)
+        agent.messages.append({"role": "user",
+                               "content": self.board.delivery(fresh)})
 
     def _finalize(self, agent: CrewAgent, provider, model,
                   reason: str) -> str:
@@ -727,9 +799,13 @@ class Crew:
         lands in the agent's report and is sealed as crew.done."""
         if agent.state == "closed":
             return
-        spec = ROLES[agent.role]
         tools = dict(self._toolsets[agent.role])
+        if self.board is not None:
+            tools["share_finding"] = self._board_tool(agent)
         if read_only:
+            # share_finding is deliberately NOT in this list: it touches
+            # nothing on disk, and a read-only scout is exactly the kind
+            # of subagent whose findings the others most need.
             tools = {n: t for n, t in tools.items()
                      if n not in ("write_file", "edit_file",
                                   "create_directory", "run_command")}
@@ -792,9 +868,8 @@ class Crew:
                     else:
                         # I7 — writes serialise across ALL workers, crew
                         # and team alike.
-                        lock = _WRITE_LOCK if spec["writes"] and name in (
-                            "write_file", "edit_file", "create_directory",
-                            "run_command") else None
+                        lock = (_WRITE_LOCK if name in MUTATING_TOOLS
+                                else None)
                         try:
                             # PHASE 2 — real local work: this is the only
                             # part of a subagent that can load the box, so
@@ -835,6 +910,9 @@ class Crew:
                 # Free on an idle box, a few real milliseconds on a busy
                 # one — this is what keeps the TUI feeling untouched.
                 self.swarm.breathe()
+                # peers may have worked something out while this
+                # subagent was busy — hand it over before its next turn
+                self._deliver_findings(agent)
                 if circling:
                     # the tool results are already appended, so its final
                     # report still has everything it actually learned

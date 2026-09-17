@@ -289,5 +289,73 @@ class RateLimitTests(unittest.TestCase):
                         "the window never narrowed after a 429")
 
 
+class WriteLockScopeTests(unittest.TestCase):
+    """The write lock has to be keyed on what a tool CAN DO, not on the
+    label we put on the role holding it."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.log = EventLog(Path(self.td.name) / "c.jsonl")
+
+    def test_a_non_writing_role_still_serialises_run_command(self):
+        # tester/analyst/debugger/optimizer are writes=False and all hold
+        # run_command, which can rewrite the tree wholesale. Gating the
+        # lock on the role let all four of them mutate it with no lock at
+        # all, alongside a coder that was holding it.
+        n = 4
+        overlap, inside, lock = [0], [0], threading.Lock()
+
+        def chat(provider, model, effort, messages, schemas, timeout):
+            if any(m.get("role") == "tool" for m in messages):
+                return reply("STATUS: DONE\nSUMMARY: ran it")
+            return reply("", [{"id": "c", "function": {
+                "name": "run_command",
+                "arguments": json.dumps({"command": "true"})}}])
+
+        p, m, e = stub()
+        crew = Crew(self.log, p, m, e, chat=chat, max_parallel=n)
+
+        def watched(**kw):
+            with lock:
+                inside[0] += 1
+                if inside[0] > 1:
+                    overlap[0] += 1
+            try:
+                time.sleep(0.03)
+                return "exit code: 0"
+            finally:
+                with lock:
+                    inside[0] -= 1
+
+        for role in ("tester", "analyst", "debugger", "optimizer"):
+            real = crew._toolsets[role]["run_command"]
+            crew._toolsets[role]["run_command"] = SimpleNamespace(
+                handler=watched, openai_schema=real.openai_schema)
+
+        agents = [crew.spawn(f"run the suite {i}", role=r)
+                  for i, r in enumerate(
+                      ("tester", "analyst", "debugger", "optimizer"))]
+        crew.wait([a.id for a in agents], timeout=30.0)
+        self.assertEqual(overlap[0], 0,
+                         "two unlocked run_commands overlapped")
+        self.assertTrue(all(a.tool_calls == 1 for a in agents))
+
+
+class CacheInvalidationTests(unittest.TestCase):
+    """One filesystem, one truth. Every write drops every cached read."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.log = EventLog(Path(self.td.name) / "c.jsonl")
+
+    def test_the_speculator_can_be_invalidated(self):
+        from fullagent.speculate import Speculator
+        spec = Speculator(self.log, lambda name, args: "OK:" + name)
+        self.assertEqual(spec.invalidate(), 0)      # exists and is safe
+        self.assertTrue(hasattr(spec, "invalidate"))
+
+
 if __name__ == "__main__":
     unittest.main()

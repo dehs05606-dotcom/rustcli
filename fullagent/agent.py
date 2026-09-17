@@ -1312,13 +1312,19 @@ class Agent:
                         and ev.name not in UNMETERED_TOOLS):
                     with crew.swarm.foreground(timeout=15.0):
                         ev.result = tool.handler(**ev.args, **extra)
-                    # a sovereign write invalidates the subagents'
-                    # cached reads too — they share one filesystem
-                    if ev.name in CREW_INVALIDATING:
-                        crew.swarm.invalidate()
                 else:
                     ev.result = tool.handler(**ev.args, **extra)
                 ev.status = "done"
+                # A sovereign write invalidates the subagents' cached
+                # reads: one filesystem, one truth. This sits OUTSIDE
+                # the branch above on purpose. Keyed to the metered
+                # branch it missed the two cases that matter most —
+                # run_command, which is unmetered and is the tool most
+                # likely to rewrite the tree wholesale, and any write
+                # made while no subagent happened to be in flight,
+                # whose stale entries would then be served to the very
+                # next batch inside the cache's lifetime.
+                self._invalidate_shared_caches(ev.name)
             except TypeError as e:
                 ev.result = f"ERROR: bad arguments for {ev.name}: {e}"
                 ev.status = "error"
@@ -1844,15 +1850,51 @@ class Agent:
         resting cost stays zero even after a batch has run."""
         crew = getattr(self, "_crew", None)
         if crew is None:
+            from .blackboard import Blackboard
             from .crew import Crew
+            # One board per session, bounded. Subagents share what they
+            # establish so the next one does not rediscover it — the
+            # duplication that call-coalescing cannot catch, because it
+            # is knowledge rather than an identical call.
             crew = Crew(self.log, self.provider, self.model, self.effort,
-                        mastermind=self.mastermind)
+                        mastermind=self.mastermind,
+                        board=Blackboard(self.log))
             self._crew = crew
         # a mid-session model or effort switch must reach subagents
         # spawned after it — the Crew reads these on every dispatch
         crew.provider, crew.model, crew.effort = (
             self.provider, self.model, self.effort)
         return crew
+
+    def _invalidate_shared_caches(self, tool_name: str) -> None:
+        """A write happened here; drop every cache that describes the
+        filesystem as it was a moment ago.
+
+        There are two of them, and both are easy to forget because
+        neither belongs to the code doing the writing:
+
+          the swarm's read cache   shared by every subagent
+          the speculator's cache   prefetched reads held for THIS turn
+
+        The speculator is the subtler one. It prefetches read-only calls
+        it expects the model to make next, and its entries only expired
+        by turn count — so a subagent (or the user's own command) could
+        rewrite a file and the sovereign would still be served the copy
+        taken before the write, with nothing anywhere reporting a
+        problem. Serial subagents made that unlikely; parallel ones make
+        it ordinary, because they write DURING the turn.
+        """
+        if tool_name not in CREW_INVALIDATING:
+            return
+        crew = getattr(self, "_crew", None)
+        if crew is not None:
+            crew.swarm.invalidate()
+        speculator = getattr(self, "speculator", None)
+        if speculator is not None:
+            try:
+                speculator.invalidate()
+            except Exception:  # noqa: BLE001 — a cache drop never fails a turn
+                pass
 
     def _ensure_conductor(self) -> Conductor:
         """The Mastermind's batch planner, built on first use."""

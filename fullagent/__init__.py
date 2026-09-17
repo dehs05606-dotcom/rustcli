@@ -18,6 +18,8 @@ Package layout:
                     machine never feels
     orchestra.py    the Mastermind arranging a batch: sealed role briefs
                     + conflict-free waves, sealed into the event log
+    blackboard.py   shared findings — what one subagent establishes, the
+                    rest are handed, once, deduped and bounded
     crew.py         persistent Codex-style subagents (spawn/send/wait/
                     close/resume/forget) — PARALLEL execution on the
                     swarm, writes still serialised (invariant I7)

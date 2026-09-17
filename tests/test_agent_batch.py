@@ -224,6 +224,43 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(reports[0].status, "done")
         self.assertIn("stopped_by", reports[0].to_dict())
 
+    def test_a_sovereign_write_drops_the_subagents_cached_reads(self):
+        # One filesystem, one truth. The invalidation used to live inside
+        # the "subagents are in flight AND this tool is metered" branch,
+        # which missed the two cases that matter most: run_command (the
+        # tool most likely to rewrite the tree, and unmetered), and any
+        # write made while no subagent happened to be running — whose
+        # stale entries are then served to the very next batch.
+        agent = self.make_agent(
+            lambda *a: reply("STATUS: DONE\nSUMMARY: ok"))
+        crew = agent._ensure_crew()
+        ran = []
+        key = 'read_file:{"path": "/x"}'
+        crew.swarm.once(key, lambda: (ran.append(1), "old")[1])
+        crew.swarm.once(key, lambda: (ran.append(1), "old")[1])
+        self.assertEqual(len(ran), 1, "the cache never held it")
+        self.assertEqual(crew.swarm.in_flight, 0)
+
+        # the sovereign runs a command that rewrites the tree, through
+        # the REAL tool path — the layer the bug was actually in
+        from fullagent.agent import ToolEvent
+        from fullagent.tools import RISK_SAFE, Tool
+
+        ev = ToolEvent(name="run_command",
+                       args={"command": "git checkout ."})
+        real = agent.tools["run_command"]
+        agent.tools["run_command"] = Tool(
+            "run_command", real.description, real.parameters,
+            lambda **kw: "exit code: 0", RISK_SAFE)
+        self.addCleanup(agent.tools.__setitem__, "run_command", real)
+        agent._execute_tool(ev, approve=lambda *a, **k: True,
+                            on_status=lambda *a, **k: None)
+        self.assertEqual(ev.status, "done", ev.result)
+
+        crew.swarm.once(key, lambda: (ran.append(1), "new")[1])
+        self.assertEqual(len(ran), 2,
+                         "a subagent could still read the pre-write copy")
+
     def test_the_legacy_alias_still_works(self):
         agent = self.make_agent(
             lambda *a: reply("STATUS: DONE\nSUMMARY: ok"))

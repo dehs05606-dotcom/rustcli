@@ -202,6 +202,25 @@ class Speculator:
 
     # -- housekeeping ------------------------------------------------------------
 
+    def invalidate(self) -> int:
+        """Drop every prefetched result. Returns how many were dropped.
+
+        A prefetch describes the filesystem at the instant it was taken,
+        and _expire() only ever retired entries by AGE — so nothing here
+        knew about writes at all. A subagent rewriting a file while the
+        turn is still running (which parallel subagents do routinely)
+        left this cache holding the pre-write copy, and serve() handed
+        it over as a hit: a wrong answer delivered with no error
+        attached. Total rather than selective, because a prefetch is
+        cheap to redo and a stale one is not cheap at all."""
+        with self._lock:
+            dropped = len(self._cache)
+            self._cache.clear()
+        if dropped:
+            self.log.append("spec.invalidate", {"dropped": dropped},
+                            actor="speculator")
+        return dropped
+
     def _expire(self) -> None:
         with self._lock:
             stale = [k for k, e in self._cache.items()
@@ -282,5 +301,16 @@ if __name__ == "__main__":
 
         text = spec.format_status()
         assert "SPECULATOR" in text and "hit-rate" in text
+
+        # -- a write drops every prefetch --------------------------------
+        # a stale hit is a wrong answer with no error attached, so this
+        # must clear the cache outright, not age it out
+        spec.speculate("read src/main.py", [])
+        assert spec._cache, "nothing prefetched to invalidate"
+        dropped = spec.invalidate()
+        assert dropped >= 1 and spec._cache == {}
+        assert spec.serve("read_file", {"path": "src/main.py"}) is None
+        assert spec.invalidate() == 0          # idempotent when empty
+        assert any(e.type == "spec.invalidate" for e in log.events())
 
     print("SPECULATOR SELF-TEST PASS")

@@ -183,6 +183,16 @@ python main.py
   may be incomplete, and the agent is told to either say so or continue
   that subagent with its context intact — never to present a partial
   finding as a settled one.
+- **Blackboard** — the thing that makes parallel subagents a *team*.
+  Coalescing removes duplicated calls; it cannot remove duplicated
+  *knowledge*, and the expensive duplication is not "both ran the same
+  grep" but "both spent four turns working out where to grep". So a
+  subagent `share_finding`s what it establishes, and every peer is handed
+  it once — deduped by content, capped per turn and in total, and
+  explicitly advisory (a peer's report, not verified truth). Measured in
+  model turns, which is what actually costs money: **−25% when every
+  subagent discovers at the same instant, −52% on realistically
+  staggered tasks, −65% when one scout gets there first.**
 - **Orchestra** — the Mastermind arranges a batch before anything
   spawns. It resolves every role's **sealed brief** through the vault, so
   a task asking for a role that has no sealed prompt is refused in one
