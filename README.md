@@ -21,7 +21,7 @@
   <a href="https://github.com/dehs05606-dotcom/rustcli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-6272a4?style=flat-square" alt="license"></a>
 </p>
 
-*`Event-Sourced Kernel` · `Goal Contracts` · `Parallel Crew` · `Adaptive Swarm` · `Self-Healing` · `Temporal Kernel` · `40+ Slash Commands` · `16 Tools` · `Kilo Code`*
+*`Event-Sourced Kernel` · `Goal Contracts` · `Parallel Crew` · `Adaptive Swarm` · `Self-Healing` · `Temporal Kernel` · `40+ Slash Commands` · `17 Tools` · `3 Providers`*
 
 <p>
   <a href="#install"><b>Install</b></a> •
@@ -87,6 +87,18 @@ requirement.
 | Termux (Android) | `curl -fsSL https://raw.githubusercontent.com/dehs05606-dotcom/rustcli/main/install-termux.sh \| bash` |
 | Any OS | `pip install git+https://github.com/dehs05606-dotcom/rustcli.git` |
 
+## Models
+
+| Model | Provider | Context | Tools | Reasoning |
+|---|---|---|---|---|
+| Union Alpha | Kilo Code | 262k | ✓ | — |
+| Atria Dawn Preview | Kios API | 262k | ✓ | — |
+| Qwen3.8 Max *(free)* | xKiro | **1M** | ✓ | ✓ |
+
+Switch with `/model`. Keys resolve in this order, so your own always
+wins: `<PROVIDER>_API_KEY` in the environment, then
+`~/.fullagent/<provider>_api_key`, then whatever ships in `config.py`.
+
 ## Run
 
 ```bash
@@ -121,8 +133,9 @@ python main.py
   `wait_for_agents` collects results, `close_agent` / `resume_agent`
   manage the lifecycle, `forget_agent` releases a throwaway worker.
   Subagents run **in parallel** on the Swarm — spawn eight and eight are
-  in flight. Live progress streams in the prompt border. All subagents
-  use Union Alpha through Kilo Code.
+  in flight, with live progress for each. Subagents use the session's
+  model by default, and `spawn_agents` takes a per-subagent override, so
+  scouts can run on a cheap model while the hard wave uses the strong one.
 - **Swarm** — the parallel substrate that makes the Crew concurrent
   *without the machine feeling it*. A subagent spends almost its whole
   life parked in a socket read waiting for the model, and parked threads
@@ -298,8 +311,10 @@ python main.py
   report: timeline, tool stats, judge verdicts, per-model usage
 - **Forecast** — `/forecast` projects turns-to-done from measured goal
   velocity and tokens-per-turn (numbers, not vibes)
-- **Provider health** — `/health` shows model errors. No alternate model
-  or provider is configured, so cross-model failover is unavailable.
+- **Provider health** — `/health` shows model errors, and cross-model
+  failover is live: three models across three providers, so a 429/5xx
+  from one switches the turn to another (once per turn, and never for a
+  4xx, which is a request problem rather than an outage)
 - **Notifications** — `/notify <webhook|file:path>` fires kernel events
   (goal closed, focus stop, workflow done…) to your sink
 - **Session resume** — `/resume` lists branches/sessions; continue any
@@ -366,7 +381,7 @@ Event-log commands:
   composed context, lineage)
 - `/dashboard` — live observability: cost, goal, crew, router, spec,
   memory, health in one screen
-- `/router` — task classification and routing history; all tasks use Union Alpha
+- `/router` — task classification and routing history
 - `/spec` — speculative execution: prefetch stats + hit-rate
 - `/recall <question>` — semantic (meaning-based) memory recall
 - `/mission [start|tick|list|abandon]` — daemon mission control

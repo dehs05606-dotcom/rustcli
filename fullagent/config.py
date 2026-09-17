@@ -83,14 +83,26 @@ class Model:
     context_window: int = DEFAULT_CONTEXT_WINDOW
 
 
-def _provider_api_key(provider: str) -> str:
+# Shipped key for xKiro, so the provider works with nothing to set up.
+# It is still the LAST resort: XKIRO_API_KEY and ~/.fullagent/xkiro_api_key
+# both win over it, so anyone with their own key never touches this file.
+_XKIRO_KEY = "sk-xt-c6509a643f568f821c3692fc31232def10803e4e8ae11925"
+
+
+def _provider_api_key(provider: str, default: str = "") -> str:
+    """Resolve a provider's key: environment, then key file, then default.
+
+    The order matters and is deliberate — an operator's own key must
+    always beat whatever is shipped in the source, or rotating a key
+    would mean editing and redeploying the program.
+    """
     key = os.environ.get(f"{provider.upper()}_API_KEY")
     if key is not None:
         return key.strip()
     try:
         return (APP_DIR / f"{provider}_api_key").read_text(encoding="utf-8").strip()
     except OSError:
-        return ""
+        return default
 
 
 PROVIDERS: dict[str, Provider] = {
@@ -108,6 +120,13 @@ PROVIDERS: dict[str, Provider] = {
         api_key=_provider_api_key("kios"),
         color="#8be9fd",
     ),
+    "xkiro": Provider(
+        key="xkiro",
+        name="xKiro",
+        base_url="https://api.xkiro.com/v1",
+        api_key=_provider_api_key("xkiro", _XKIRO_KEY),
+        color="#bd93f9",
+    ),
 }
 
 MODELS: list[Model] = [
@@ -115,6 +134,17 @@ MODELS: list[Model] = [
           supports_tools=True, context_window=262_144),
     Model("atria-dawn-preview", "kios", "Atria Dawn Preview",
           tag="preview", supports_tools=True),
+    # Verified against the live endpoint rather than assumed: the model
+    # list reports context_length 1,000,000, max_output_tokens 65,536 and
+    # capabilities {tools, reasoning, vision}, and a real request came
+    # back with a proper tool_call and a proper SSE stream. Those two
+    # flags are not cosmetic — supports_tools=False would leave a
+    # subagent holding no tools at all, and it would look like the model
+    # simply refusing to work.
+    Model("qwen/qwen3.8-max:free", "xkiro", "Qwen3.8 Max",
+          tag="free", tag_color="#50fa7b",
+          supports_tools=True, supports_reasoning=True,
+          context_window=1_000_000),
 ]
 
 DEFAULT_MODEL_ID = "stealth/union-alpha"

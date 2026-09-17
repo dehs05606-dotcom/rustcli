@@ -394,6 +394,12 @@ def _window_max_tokens(model: Model, effort: Effort, messages: list[dict],
 # FullAgent asks for 200k output tokens everywhere, but each backend has its
 # own hard ceiling. Clamp at send time so the request is never rejected for
 # an oversized max_tokens; providers without a known cap pass through.
+# Per-provider ceiling on requested OUTPUT tokens. Only providers that
+# actually REJECT an oversized request belong here. xKiro deliberately
+# does not: its model list declares max_output_tokens 65,536, but the
+# endpoint accepts max_tokens=200000 and returns 200 — verified against
+# the live API, streaming and non-streaming, with and without tools. A
+# cap it does not need would only lower the ceiling for no reason.
 _MAX_TOKENS_CAP: dict[str, int] = {"kilo": 131_072}
 
 
