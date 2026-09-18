@@ -90,7 +90,7 @@ class Model:
 # Shipped key for xKiro, so the provider works with nothing to set up.
 # It is still the LAST resort: XKIRO_API_KEY and ~/.fullagent/xkiro_api_key
 # both win over it, so anyone with their own key never touches this file.
-_XKIRO_KEY = "sk-xt-c6509a643f568f821c3692fc31232def10803e4e8ae11925"
+_XKIRO_KEY = "sk-xt-d7f0cfd433fff3c946d3598e0abbafd93af6dee67372e782"
 
 
 def _provider_api_key(provider: str, default: str = "") -> str:
@@ -149,6 +149,14 @@ MODELS: list[Model] = [
           tag="free", tag_color="#50fa7b",
           supports_tools=True, supports_reasoning=True,
           context_window=1_000_000),
+    # Same treatment: taken from the provider's own /models listing, not
+    # guessed. It reports context_length 1,048,576, capabilities
+    # {tools, reasoning} and access_tier "premium" — hence the "paid"
+    # tag, so nobody picks it expecting a free model and gets billed.
+    Model("deepseek/deepseek-v4-flash-0731", "xkiro", "DeepSeek V4 Flash 0731",
+          tag="paid", tag_color="#ffb86c",
+          supports_tools=True, supports_reasoning=True,
+          context_window=1_048_576),
 ]
 
 DEFAULT_MODEL_ID = "stealth/union-alpha"
