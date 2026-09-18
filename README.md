@@ -377,8 +377,10 @@ Event-log commands:
 - `/auto [on|off|status]` — the AutoPilot self-routing brain (on by default)
 - `/prompt [main|master|list]` — choose the system prompt: `main` (compact)
   or `master` (the extended 130k+ specification prompt)
-- `/adherence` — per-clause adherence scores, recent misses, and the
-  directive most worth rewriting
+- `/adherence [model|depth|prompt|effort]` — per-clause adherence
+  scores, or the comparison table sliced along one dimension
+- `/promptlab <a> <b>` — run the scenario set under two prompts and print
+  the per-clause deltas (costs live model calls)
 - `/mastermind` — the prompt-coherence ledger (sealed prompts, gate,
   composed context, lineage)
 - `/dashboard` — live observability: cost, goal, crew, router, spec,
@@ -453,6 +455,7 @@ fullagent/
   systemprompt.py  the ONE home of every system prompt (single source)
   mastermind.py    prompt coherence: sealed vault, gate, composer, lineage
   adherence.py     did the model follow it — clauses decided from the log
+  promptlab.py     A/B two prompts on a scenario set, clause by clause
   tools.py         16 tools: files, shell, search, real-time web
   client.py        streaming OpenAI-compatible client (SSE, retries, cancel)
   agent.py         agent loop: LLM <-> tools, event-sourced on the kernel
@@ -567,6 +570,50 @@ tests pass") is not a claim, and a directive that cannot be decided from
 recorded facts is left out rather than guessed at. Run `/adherence` for
 the per-clause breakdown, the recent misses, and the directive most worth
 rewriting. Nothing in it changes what the model sees.
+
+Every verdict is sealed with its attribution — model, effort, prompt, and
+the turn's **tool-loop depth** — so the ledger can be sliced:
+
+```
+/adherence model     is one model following the prompt worse than another?
+/adherence depth     does adherence decay as a turn gets longer?
+```
+
+Depth is the one to watch. The prompt is seated once per turn at position
+0 and never re-seated inside the loop, while up to `MAX_TOOL_ITERATIONS`
+(200) model calls pile tool output between the directives and the point
+where the model writes. Measured with this repo's own estimator and the
+4.2k `main` prompt, the directives are ~51% of context at depth 5, 9.4% at
+depth 50, and 2.5% at depth 200. If prompt influence decays with depth, it
+shows up as a gradient down those bands — and `/adherence depth` says so
+in as many words.
+
+### Promptlab — testing a prompt change like a code change
+
+Editing a prompt is usually the least reviewed change anyone makes to an
+agent: code gets a diff and an exit code, a prompt gets an opinion.
+`fullagent/promptlab.py` closes that too. It runs a fixed scenario set
+under prompt A, runs it again under prompt B, scores both with the same
+adherence clauses, and prints the deltas:
+
+```
+  clause                   careless     careful    delta
+  verify-before-success          0%        100%   +100pt
+  read-before-edit               0%        100%   +100pt
+  overall                        0%        100%
+  → careful holds 100 points more of the directives it was measured on
+```
+
+Each scenario declares which clauses it exists to exercise, and a
+scenario that stops triggering them is reported rather than counted as a
+pass — a green board over a measurement that never fired is the failure
+mode worth guarding against hardest.
+
+One honest limit: cassette replay returns the response recorded for a
+given request, and changing the prompt changes the request. Replay buys
+determinism, not counterfactuals, so comparing two prompts for real means
+calling the model twice. `/promptlab main master` does exactly that and
+says up front what it will cost.
 
 ## v3 — eight advanced subsystems
 

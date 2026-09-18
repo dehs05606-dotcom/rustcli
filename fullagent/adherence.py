@@ -390,6 +390,50 @@ CLAUSES: tuple[Clause, ...] = (
 # The ledger
 # ---------------------------------------------------------------------------
 
+# Tool-loop depth bands. The prompt sits at position 0 and is never
+# re-seated inside a turn, so everything a turn does accumulates between
+# the directives and the point where the model writes. Measured on this
+# repo's own estimator, with the 4.2k `main` prompt, the directives are
+# ~50% of context at depth 5 and ~2.5% at depth 200 (MAX_TOOL_ITERATIONS).
+# If prompt influence decays with depth, it shows up as a downward
+# gradient across these bands — which is the whole point of having them.
+_DEPTH_BANDS = ((5, "0-5"), (20, "6-20"), (50, "21-50"),
+                (100, "51-100"), (10 ** 9, "101+"))
+
+
+def _depth_band(depth: int) -> str:
+    for ceiling, label in _DEPTH_BANDS:
+        if depth <= ceiling:
+            return label
+    return _DEPTH_BANDS[-1][1]
+
+
+_BUCKETERS = {
+    "model": lambda d: str(d.get("model") or "(unrecorded)"),
+    "prompt": lambda d: str(d.get("prompt") or "(unrecorded)"),
+    "effort": lambda d: str(d.get("effort") or "(unrecorded)"),
+    "depth": lambda d: _depth_band(int(d.get("depth") or 0)),
+}
+
+#: The order buckets are printed in, per dimension. Depth is ordinal, so
+#: it reads as a gradient rather than an alphabetical jumble.
+_BUCKET_ORDER = {"depth": [label for _c, label in _DEPTH_BANDS]}
+
+
+def _short(clause_id: str, width: int = 13) -> str:
+    """A clause id shortened for a table header, on hyphen boundaries.
+
+    Cutting mid-word ("read-before-e") costs more legibility than the
+    character it saves; dropping whole segments ("read-before") does not,
+    and the remainder still names the clause unambiguously."""
+    parts = clause_id.split("-")
+    out = parts[0]
+    for part in parts[1:]:
+        if len(out) + 1 + len(part) > width:
+            break
+        out += "-" + part
+    return out[:width]
+
 
 @dataclass
 class TurnAdherence:
@@ -463,12 +507,24 @@ class AdherenceLedger:
         otherwise judge every later citation against a stale root."""
         return self._root or Path.cwd()
 
-    def score_turn(self, since_seq: int,
-                   prompt: str = "") -> TurnAdherence:
+    def score_turn(self, since_seq: int, prompt: str = "",
+                   model: str = "", effort: str = "",
+                   depth: int | None = None) -> TurnAdherence:
         """Evaluate every clause against the turn after `since_seq` and
         seal the verdicts. Never raises: a clause that blows up is
         recorded as not applicable, because a broken measurement must not
-        be able to break a turn it was only ever watching."""
+        be able to break a turn it was only ever watching.
+
+        `model`, `effort` and `depth` are the attribution: without them a
+        violation is a fact about "the agent", which is not actionable.
+        With them it is a fact about one model, at one effort, at one
+        tool-loop depth — and "the newer model ignores the prompt"
+        becomes something the ledger can confirm or deny.
+
+        `depth` is the turn's real tool-loop iteration count, which only
+        the caller knows. Absent it, the number of tool calls is used as
+        a lower-bound proxy so a replayed or reconstructed log still
+        slices."""
         facts = facts_from_log(self.log, since_seq, self.root)
         result = TurnAdherence()
         for clause in self.clauses:
@@ -480,16 +536,25 @@ class AdherenceLedger:
                             evidence=f"clause error: {type(exc).__name__}"))
         self.log.append("prompt.adherence",
                         {"prompt": prompt, "since_seq": since_seq,
+                         "model": model, "effort": effort,
+                         "depth": (len(facts.actions) if depth is None
+                                   else int(depth)),
+                         "tool_calls": len(facts.actions),
                          **result.to_dict()},
                         actor="kernel")
         return result
 
     # -- reading the ledger back ------------------------------------------
 
-    def status(self) -> AdherenceState:
+    def rows(self) -> list[dict]:
+        """Every sealed prompt.adherence event, oldest first."""
         from .kernel import fold
+        return list(fold(self.log).prompt_adherence)
+
+    def status(self, rows: list[dict] | None = None) -> AdherenceState:
+        """Fold the ledger. Pass `rows` to fold a slice of it instead."""
         st = AdherenceState()
-        for d in fold(self.log).prompt_adherence:
+        for d in (self.rows() if rows is None else rows):
             st.turns_scored += 1
             verdicts = d.get("verdicts") or []
             if d.get("applicable"):
@@ -511,6 +576,80 @@ class AdherenceLedger:
                          "evidence": str(v.get("evidence", ""))})
         st.recent_violations = st.recent_violations[-8:]
         return st
+
+    def by(self, dimension: str) -> dict[str, AdherenceState]:
+        """The ledger split along one dimension, each bucket folded.
+
+        This is what turns an impression into a question with an answer.
+        "The new model does not follow the prompt" is not checkable;
+        by("model") is. "It drifts on long tasks" is not checkable;
+        by("depth") is."""
+        key = _BUCKETERS.get(dimension)
+        if key is None:
+            raise KeyError(f"unknown dimension {dimension!r} — "
+                           f"available: {', '.join(sorted(_BUCKETERS))}")
+        buckets: dict[str, list[dict]] = {}
+        for d in self.rows():
+            buckets.setdefault(key(d), []).append(d)
+        return {k: self.status(v) for k, v in buckets.items()}
+
+    def format_by(self, dimension: str) -> str:
+        """The ledger sliced along one dimension, as a comparison table.
+
+        One row per bucket, one column per clause, so the shape of the
+        problem is visible at a glance: a column that falls away down the
+        depth bands is the prompt losing ground to the turn's own tool
+        output; a row that trails the others under `model` is one model
+        following the prompt worse than its peers."""
+        try:
+            buckets = self.by(dimension)
+        except KeyError as exc:
+            return str(exc).strip("\"'")
+        if not buckets:
+            return f"ADHERENCE by {dimension} — no turns scored yet."
+
+        order = _BUCKET_ORDER.get(dimension)
+        names = ([b for b in order if b in buckets] if order
+                 else sorted(buckets))
+        clauses = [c.id for c in self.clauses]
+        # a clause no bucket ever exercised adds a column of dashes
+        clauses = [c for c in clauses
+                   if any(buckets[b].per_clause.get(c, {}).get("applicable")
+                          for b in names)]
+
+        head = f"ADHERENCE by {dimension}"
+        if dimension == "depth":
+            head += "  (tool-loop iterations in the turn)"
+        lines = [head, ""]
+        width = max([len(n) for n in names] + [8])
+        header = f"  {'bucket':<{width}}  {'overall':>9}  {'turns':>5}"
+        for c in clauses:
+            header += f"  {_short(c):>13}"
+        lines.append(header)
+
+        for name in names:
+            st = buckets[name]
+            overall = "n/a" if st.score is None else f"{st.score * 100:.0f}%"
+            row = (f"  {name:<{width}}  {overall:>9}  "
+                   f"{st.turns_scored:>5}")
+            for c in clauses:
+                cell = st.per_clause.get(c, {})
+                app = cell.get("applicable", 0)
+                row += (f"  {'—':>13}" if not app else
+                        f"  {cell['held'] / app * 100:>10.0f}% ")
+            lines.append(row)
+
+        if dimension == "depth" and len(names) > 1:
+            scored = [(n, buckets[n].score) for n in names
+                      if buckets[n].score is not None]
+            if len(scored) > 1 and scored[0][1] - scored[-1][1] > 0.15:
+                lines.append("")
+                lines.append(
+                    f"  adherence falls {(scored[0][1] - scored[-1][1]) * 100:.0f} "
+                    f"points from {scored[0][0]} to {scored[-1][0]} "
+                    f"iterations — the directives are not being dropped, "
+                    f"they are being outweighed by the turn's own output.")
+        return "\n".join(lines)
 
     def format_status(self) -> str:
         st = self.status()
@@ -544,6 +683,8 @@ class AdherenceLedger:
                              f"\"{directive.get(worst[0], worst[0])}\"")
         lines.append("  measured from the event log; nothing here changed "
                      "what the model saw.")
+        lines.append("  slice it: /adherence "
+                     + " · /adherence ".join(sorted(_BUCKETERS)))
         return "\n".join(lines)
 
 
@@ -750,6 +891,80 @@ if __name__ == "__main__":
             assert "ADHERENCE" in text
             assert "verify-before-success" in text
             assert "the directive to look at" in text
+
+            # -- attribution: the ledger slices ------------------------------
+            _n[0] += 1
+            log = fresh()
+            led = AdherenceLedger(log, root=root)
+
+            def scored_turn(model, depth, verified):
+                """One turn that edits and claims success, optionally with
+                a passing check after the edit."""
+                since = log.head()
+                call(log, "read_file", {"path": str(real)})
+                call(log, "edit_file", {"path": str(real)})
+                if verified:
+                    call(log, "run_command", {"cmd": "pytest"}, exit_code=0)
+                say(log, "Fixed it — the tests pass now.")
+                led.score_turn(since, prompt="main", model=model,
+                               effort="high", depth=depth)
+
+            # a shallow model that verifies, and a deep one that does not
+            scored_turn("model-a", 3, True)
+            scored_turn("model-a", 4, True)
+            scored_turn("model-b", 80, False)
+            scored_turn("model-b", 120, False)
+
+            # both models read before editing, so that clause holds for
+            # both; only the deep one skips verification. The slice has to
+            # resolve that per clause, not smear it into one number.
+            by_model = led.by("model")
+            assert set(by_model) == {"model-a", "model-b"}, by_model
+            assert by_model["model-a"].score == 1.0
+            assert by_model["model-b"].score == 0.5, by_model["model-b"]
+            assert by_model["model-b"].per_clause["read-before-edit"] == {
+                "applicable": 2, "held": 2}
+            assert by_model["model-b"].per_clause["verify-before-success"] \
+                == {"applicable": 2, "held": 0}
+
+            # depths 3 and 4 land in one band; 80 and 120 in two others
+            by_depth = led.by("depth")
+            assert set(by_depth) == {"0-5", "51-100", "101+"}, by_depth
+            assert by_depth["0-5"].score == 1.0
+            assert by_depth["51-100"].score == 0.5
+            assert by_depth["101+"].score == 0.5
+
+            assert _depth_band(0) == "0-5" and _depth_band(5) == "0-5"
+            assert _depth_band(6) == "6-20" and _depth_band(200) == "101+"
+
+            # every turn carries its attribution into the sealed event
+            for r in led.rows():
+                assert r["model"] in ("model-a", "model-b"), r
+                assert r["effort"] == "high" and r["depth"] > 0, r
+
+            # depth falls back to the tool-call count when not supplied
+            since = log.head()
+            call(log, "read_file", {"path": str(real)})
+            call(log, "edit_file", {"path": str(real)})
+            led.score_turn(since, prompt="main")
+            assert led.rows()[-1]["depth"] == 2, led.rows()[-1]
+
+            # the rendered tables say what they should
+            text = led.format_by("model")
+            assert "model-a" in text and "model-b" in text
+            assert "verify-before" in text and "read-before" in text
+            assert _short("read-before-edit") == "read-before"
+            assert _short("failures-surfaced") == "failures"
+            assert _short("goal-proof-discipline") == "goal-proof"
+            text = led.format_by("depth")
+            assert "0-5" in text and "101+" in text
+            # ordinal, not alphabetical — the gradient must read downward
+            assert text.index("0-5") < text.index("101+")
+            assert "outweighed by the turn's own output" in text
+            assert "unknown dimension" in led.format_by("nonsense")
+
+            # a dimension nothing recorded still buckets, as (unrecorded)
+            assert "(unrecorded)" in led.by("model")
 
             # -- a clause that raises cannot break the turn -----------------
             def _boom(_f: TurnFacts) -> Verdict:

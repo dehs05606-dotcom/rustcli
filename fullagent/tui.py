@@ -286,7 +286,9 @@ SLASH_COMMANDS = [
     ("/auto", "autopilot self-routing — /auto [on|off|status]"),
     ("/prompt", "system prompt — /prompt [main|master|list]"),
     ("/mastermind", "prompt coherence ledger — sealed prompts, gate, lineage"),
-    ("/adherence", "did the model follow the prompt — clause scores + misses"),
+    ("/adherence", "did the model follow the prompt — /adherence "
+                   "[model|depth|prompt|effort]"),
+    ("/promptlab", "A/B two prompts on the scenario set — /promptlab a b"),
     ("/dashboard", "live observability — cost, goal, agents, router, spec"),
     ("/router", "smart model routing — decisions + savings"),
     ("/spec", "speculative execution — prefetch stats + hit-rate"),
@@ -1321,8 +1323,9 @@ class UI:
         elif cmd == "/mastermind":
             self.print_info(self.agent.mastermind.format_status(), C["pink"])
         elif cmd == "/adherence":
-            self.print_info(
-                self.agent.mastermind.adherence.format_status(), C["pink"])
+            self._cmd_adherence(arg)
+        elif cmd == "/promptlab":
+            self._cmd_promptlab(arg)
         elif cmd == "/dashboard":
             self.print_info(self.agent.dashboard.render(), C["cyan"])
         elif cmd == "/router":
@@ -2432,6 +2435,66 @@ class UI:
                             C["cyan"])
         else:
             self.print_error("usage: /auto [on|off|status]")
+
+    def _cmd_adherence(self, arg: str) -> None:
+        """Whether the model actually followed the prompt, whole or sliced.
+
+        Bare, it is the clause scorecard. With a dimension it is the
+        comparison table — which is where a complaint like "the newer
+        model ignores the prompt" either shows up as a number or turns
+        out not to be there."""
+        ad = self.agent.mastermind.adherence
+        sub = arg.strip().lower()
+        if not sub:
+            self.print_info(ad.format_status(), C["pink"])
+            return
+        self.print_info(ad.format_by(sub), C["pink"])
+
+    def _cmd_promptlab(self, arg: str) -> None:
+        """A/B two prompts over the scenario set and print the deltas.
+
+        This runs the scenarios for real, twice — once per prompt — so it
+        costs model calls. That is the only way to learn how a model
+        behaves under a prompt it has not been run with; replay can give
+        determinism but never a counterfactual."""
+        from .promptlab import AgentExecutor, DEFAULT_SCENARIOS, PromptLab
+        from . import systemprompt
+        import tempfile
+
+        parts = arg.split()
+        if len(parts) != 2:
+            self.print_error(
+                "usage: /promptlab <prompt-a> <prompt-b>   e.g. "
+                "/promptlab main master   ·  known: "
+                + ", ".join(systemprompt.names()))
+            return
+        a, b = parts
+        for name in (a, b):
+            if name not in systemprompt.PROMPTS:
+                self.print_error(f"unknown prompt {name!r} — available: "
+                                 + ", ".join(systemprompt.names()))
+                return
+        if a == b:
+            self.print_error("those are the same prompt — nothing to "
+                             "compare")
+            return
+
+        n = len(DEFAULT_SCENARIOS)
+        self.print_info(
+            f"running {n} scenario(s) under {a}, then under {b} — "
+            f"{n * 2} live turns. This costs API calls.", C["cyan"])
+        lab = PromptLab()
+        executor = AgentExecutor(self.agent)
+        with tempfile.TemporaryDirectory(prefix="promptlab-") as td:
+            root = Path(td)
+            try:
+                run_a = lab.run(a, executor, root)
+                run_b = lab.run(b, executor, root)
+            except Exception as exc:              # noqa: BLE001
+                self.print_error(f"promptlab failed: "
+                                 f"{type(exc).__name__}: {exc}")
+                return
+            self.print_info(lab.format_comparison(run_a, run_b), C["pink"])
 
     def _cmd_prompt(self, arg: str) -> None:
         """Select which system prompt the model gets (systemprompt.py is

@@ -144,6 +144,10 @@ class Turn:
     usage: dict | None = None
     scorecard: dict = field(default_factory=dict)
     duration: float = 0.0
+    # model calls this turn made (the tool-loop depth). The prompt is
+    # seated once at the top of a turn and never re-seated inside it, so
+    # this is how far the directives ended up from the generation point.
+    iterations: int = 0
     timestamp: str = field(
         default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
 
@@ -726,6 +730,7 @@ class Agent:
         self._turn_status = None
         self._turn_output = None
         turn.duration = time.time() - started
+        turn.iterations = iterations
         try:
             self._score_turn(turn)
         except Exception:
@@ -735,8 +740,10 @@ class Agent:
             # runs AFTER the turn is finished and touches nothing: the
             # model has already answered, and no clause can reach back
             # into what it saw. Observation, never enforcement.
-            self.mastermind.adherence.score_turn(self._turn_start_seq,
-                                                 prompt=self.cfg.prompt)
+            self.mastermind.adherence.score_turn(
+                self._turn_start_seq, prompt=self.cfg.prompt,
+                model=self.model.id, effort=self.cfg.effort,
+                depth=iterations)
         except Exception:
             pass  # a measurement must never be able to break a turn
         try:
