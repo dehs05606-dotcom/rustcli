@@ -475,7 +475,7 @@ fullagent/
   promptaudit.py   is the prompt any good as a document — read at 49k
   adherence.py     did the model follow it — clauses decided from the log
   promptlab.py     A/B two prompts on a scenario set, clause by clause
-  tools.py         16 tools: files, shell, search, real-time web
+  tools.py         17 tools: files, shell, search, real-time web
   client.py        streaming OpenAI-compatible client (SSE, retries, cancel)
   agent.py         agent loop: LLM <-> tools, event-sourced on the kernel
   kernel.py        Temporal Kernel: append-only, content-addressed event log
@@ -489,6 +489,16 @@ fullagent/
   orchestra.py     the Mastermind arranging a batch — sealed briefs, conflict-free waves
   crew.py          persistent Codex-style subagents — parallel on the swarm, writes serialised
   workflows.py     saved multi-step pipelines — phased orchestration (serial steps)
+  toolcontract.py  typed contract per tool — schema, error taxonomy, retry, permission
+  toolpolicy.py    capabilities, roles, path confinement, command policy, network allow-list
+  dispatch.py      the one call path — validate, gate, approve, trace, time out, retry
+  orchestrator.py  plan → execute → verify → roll back, with a sealed step ledger
+  promptrules.py   compiles the system prompt into priority-banded rules
+  constitution.py  rules as signed, versioned, append-only policy objects
+  guardrail.py     three-stage verification over actions and replies
+  compliance.py    per-model adherence scoring with asymmetric hysteresis
+  benchmark.py     fixed scenarios scoring how well a model follows the prompt
+  audit.py         audit trail, integrity check, dashboard, redacted export
   autopilot.py     self-routing: auto goal mode / real-time web
   router.py        task classification and routing through Union Alpha
   semantic.py      semantic vector memory — meaning-based recall
@@ -514,7 +524,11 @@ with `FULLAGENT_HOME`). Each module ships a self-test:
 `.semantic`, `.speculate`, `.dashboard`, `.daemon`, `.healer`, `.skills`,
 `.council`, `.taint`, `.kgraph`, `.cov`, `.fuzz`, `.mutate`).
 
-Streaming/UI regressions (no API key needed), from this directory:
+Every check, in one command and with no API key: **`./run-checks.sh`** —
+compile, all module self-tests, the full `unittest` suite, and the
+contract, dispatch and orchestrator invariants. The same script runs in a
+terminal and in CI, so a green terminal and a green pipeline mean the
+same thing. For just the regression suite:
 `python -m unittest discover -s tests -v`.
 
 ## System prompts — one file, one delivery path
@@ -863,6 +877,134 @@ pure fold. These are real engineering tools, not estimates.
 | **cov.py** | Genuine line coverage, not an estimate: `sys.settrace` (the same hook `coverage.py` uses) records every executed line of the target while a subject runs, compared against executable lines derived from the AST. The trace only records — never alters control flow — and is always restored. | `/coverage` · tool `measure_coverage` |
 | **fuzz.py** | Property-based fuzzing: typed generators (int, str, list, dict, bytes) biased toward boundaries (0, -1, empty, huge, unicode), plus mutated inputs. Crashes are SHRUNK to a minimal reproducer — the difference between "it crashed somewhere" and "here is the smallest input that breaks it." Deterministic under a seed. | `/fuzz` · tool `fuzz_target` |
 | **mutate.py** | Mutation testing — answers what tests alone cannot: *can your tests actually catch bugs?* AST NodeTransformers generate real mutants (operator flips, condition negations, broken returns); the suite runs against each. Killed = suite caught it; survived = a real hole. Score = killed / (killed + survived). The original file is always restored. | `/mutate <file> <suite-cmd>` |
+
+## The tooling system — contracts, dispatch, orchestration
+
+Tools used to be plain functions called by name. Nothing described what
+one accepted or returned, a failure came back as a string the caller had
+to read, and two callers could disagree about whether a failed call was
+worth repeating. Four modules fix that, and
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the full account.
+
+**Quickstart.** Everything below runs with no API key:
+
+```python
+from fullagent.dispatch import Dispatcher
+from fullagent.toolcontract import build_contracts
+from fullagent.toolpolicy import ToolPolicy
+from fullagent.tools import build_registry
+
+registry  = build_registry()
+policy    = ToolPolicy("developer", roots=("/home/me/project",))
+dispatch  = Dispatcher(policy=policy, approve=lambda contract, args: True)
+dispatch.register_registry(registry, build_contracts(registry))
+
+print(dispatch.negotiate().format())     # what this role can actually run
+result = dispatch.call("read_file", {"path": "README.md"})
+print(result.ok, result.trace_id, result.attempts)
+print(dispatch.format_status())          # calls, failures, retries, denials
+```
+
+A multi-step change, planned and reversible:
+
+```python
+from fullagent.orchestrator import Expectation, Orchestrator, Plan, Step
+
+plan = Plan("add a config file", (
+    Step("write", "write_file",
+         {"path": "conf.toml", "content": "debug = true\n"},
+         expect=Expectation(path_exists=("conf.toml",)),
+         undo_tool="delete_path", undo_args={"path": "conf.toml"}),
+    Step("check", "read_file", {"path": "conf.toml"},
+         expect=Expectation(contains=("debug",))),
+))
+
+orch = Orchestrator(dispatch, approve=lambda plan, review: True)
+out = orch.run(plan)
+print(out.format())      # a ledger line per step, with what was undone
+```
+
+If any step fails its check, the earlier steps are undone in reverse
+order and anything that could not be undone is named in the result. If
+any step could not have run — a tool that does not exist, an argument
+that does not fit the schema, a capability this role does not hold — the
+plan is refused whole and nothing runs at all.
+
+| Module | What it settles |
+|---|---|
+| **toolcontract.py** | One typed contract per tool: input/output schema, permission class, idempotency, timeout, retry policy, and a closed nine-code error taxonomy where retryability belongs to the code, not the call site. Contracts are derived from the registry, never restated, so the copy the model sees and the copy the dispatcher validates cannot drift. |
+| **toolpolicy.py** | Deny by default. Five capabilities, four roles, path confinement checked *after* `resolve()` so a symlink cannot walk out of the tree, a destructive-command policy, per-tool call ceilings, and a network allow-list whose SSRF blocklist runs first — an allow-list entry cannot unblock a link-local or private host. |
+| **dispatch.py** | The single call path: validate → policy → approval → run → classify → retry → validate the output. A handler runs in a worker thread and is abandoned when it overruns its budget. Only an idempotent call is ever repeated. Every call carries a trace id and lands in the event log. |
+| **orchestrator.py** | Plan, execute, verify, undo. A plan is validated whole before its first step runs; approval is asked once for the plan rather than once per step; a failed step rolls the completed ones back in reverse and reports by name anything it could not reverse. |
+
+## Security model
+
+The short version: **a call that violates the prompt or the machine's
+permissions does not execute**, and everything that did execute is on the
+record. What no client-side layer can do — this one included — is make a
+model obey a prompt; token generation happens elsewhere.
+
+- **Deny by default.** A tool with no capability entry gets no
+  capability. A destructive or outward-facing call with no approval hook
+  is refused, because a session that cannot ask a human must not answer
+  on the human's behalf. An approval hook that raises is not consent.
+- **Least privilege.** Four roles, from `untrusted` (read only) to
+  `operator`. A role can hold a capability *on condition of asking*.
+- **Path confinement after resolution.** Paths are resolved first, then
+  tested against the roots, so a symlink pointing out of the tree is out
+  of the tree.
+- **Network.** Non-HTTP schemes, cloud metadata addresses, loopback and
+  RFC1918 ranges are blocked before any allow-list is consulted.
+  Credentials in a URL are discarded before the host is read.
+  `web_fetch` re-checks **every redirect hop**, because the policy layer
+  only ever sees the URL the model asked for and a 302 arrives after
+  that check.
+- **Secrets.** The signing key for policy objects lives at
+  `~/.fullagent/constitution.key`, mode 0600, and is never logged.
+  `audit.py` redacts by pattern at export time.
+- **Tamper evidence, not tamper proofing.** The event log is hash-chained
+  and `audit.verify()` re-hashes it. Anyone who owns the machine can
+  rewrite the log; they cannot rewrite it without verification failing.
+
+Known limits, stated because a security section that lists only strengths
+is marketing: the shell is governed by a **deny-list**, so a destructive
+command nobody wrote a pattern for is allowed — the capability check, the
+ceilings and the approval hook are the layers standing behind it. The
+policy layer refuses calls; it does not sandbox the process, so a tool
+runs with the agent's own privileges. A tool that overruns its timeout is
+abandoned, not killed.
+
+To report a security problem, open an issue with the steps to reproduce.
+
+## Contributing
+
+```bash
+git clone https://github.com/dehs05606-dotcom/rustcli
+cd rustcli
+pip install -r requirements.txt
+./run-checks.sh                 # must be green before you push
+```
+
+House rules, all of them enforced by `run-checks.sh`:
+
+1. **Every module carries its own `__main__` self-test.** `run_selftests.py`
+   runs all of them as subprocesses; a new module without one fails the
+   suite. The self-test is the module's proof, and it must print a line
+   ending in `PASS`.
+2. **Pure stdlib inside `fullagent/`**, except the three packages in
+   `requirements.txt`. The agent has to run on Termux.
+3. **Cross-module behaviour goes in `tests/`.** A module self-test covers
+   a module alone; anything that crosses a seam belongs in a test file.
+4. **A new tool needs four edits** — the function and its registry entry
+   in `tools.py`, a `TOOL_CAPABILITIES` entry in `toolpolicy.py`, a
+   `_TRAITS` entry in `toolcontract.py` if the defaults are wrong, and
+   tests in `tests/test_tooling_system.py`. The steps are spelled out in
+   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#adding-a-tool).
+5. **No new schema keyword without a validator.** `validate()` implements
+   a documented subset of JSON Schema and a test asserts no tool uses a
+   keyword outside it — an unchecked keyword reads as a guarantee.
+6. **Report what actually happened.** Paste real command output in a pull
+   request. A test that was skipped is not a test that passed.
 
 ---
 

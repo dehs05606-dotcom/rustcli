@@ -19,6 +19,9 @@ from pathlib import Path
 
 from fullagent import tools as T
 from fullagent.dispatch import Dispatcher, TraceContext
+from fullagent.orchestrator import (COMPENSATED, DONE, FAILED, IRREVERSIBLE,
+                                    SKIPPED, Expectation, Orchestrator, Plan,
+                                    Step)
 from fullagent.kernel import EventLog
 from fullagent.toolcontract import (E_NOT_FOUND, E_PERMISSION, E_TIMEOUT,
                                     E_UPSTREAM, E_VALIDATION, IDEMPOTENT,
@@ -469,6 +472,134 @@ class TestDispatchGuarantees(Sandbox):
             contract = d.contract(name)
             self.assertIsNotNone(contract)
             self.assertNotIn(name, d.negotiate().unavailable, name)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration: plan, execute, verify, undo
+# ---------------------------------------------------------------------------
+
+class TestOrchestrator(Sandbox):
+
+    def orch(self, role="developer", approve=lambda p, r: True):
+        return Orchestrator(self.dispatcher(role, approve=lambda c, a: True),
+                            log=self.log, approve=approve)
+
+    def write(self, step_id, name, content="x\n"):
+        path = str(self.root / name)
+        return path, Step(step_id, "write_file",
+                          {"path": path, "content": content},
+                          expect=Expectation(path_exists=(path,)),
+                          undo_tool="delete_path", undo_args={"path": path})
+
+    def test_a_plan_that_succeeds_reports_every_step_done(self):
+        path, step = self.write("one", "one.txt", "alpha\n")
+        out = self.orch().run(Plan("write one file", (step,)))
+        self.assertTrue(out.ok, out.format())
+        self.assertEqual(out.entry("one").status, DONE)
+        self.assertTrue(Path(path).exists())
+
+    def test_a_failed_verification_undoes_the_earlier_steps(self):
+        first_path, first = self.write("first", "first.txt")
+        second_path = str(self.root / "second.txt")
+        second = Step("second", "write_file",
+                      {"path": second_path, "content": "y\n"},
+                      expect=Expectation(contains=("never written",)),
+                      undo_tool="delete_path",
+                      undo_args={"path": second_path})
+        third = Step("third", "read_file", {"path": first_path})
+
+        out = self.orch().run(Plan("two writes", (first, second, third)))
+        self.assertFalse(out.ok)
+        self.assertEqual(out.entry("first").status, COMPENSATED)
+        self.assertEqual(out.entry("second").status, FAILED)
+        self.assertEqual(out.entry("third").status, SKIPPED)
+        self.assertFalse(Path(first_path).exists())
+        self.assertFalse(Path(second_path).exists(),
+                         "the failing step left its own file behind")
+
+    def test_an_invalid_step_stops_the_plan_before_anything_runs(self):
+        path, good = self.write("good", "good.txt")
+        typo = Step("typo", "read_file", {"pth": path})
+        out = self.orch().run(Plan("one typo", (good, typo)))
+        self.assertFalse(out.ok)
+        self.assertFalse(Path(path).exists(), "the plan half-ran")
+        self.assertTrue(all(e.status == SKIPPED for e in out.ledger))
+
+    def test_an_uncompensated_destructive_step_is_refused(self):
+        victim = self.root / "victim.txt"
+        victim.write_text("bye\n")
+        plan = Plan("delete", (Step("nuke", "delete_path",
+                                    {"path": str(victim)}),))
+        out = self.orch().run(plan)
+        self.assertFalse(out.ok)
+        self.assertTrue(victim.exists(), "it ran anyway")
+        self.assertTrue(out.review.irreversible)
+
+    def test_the_same_step_runs_when_the_plan_owns_the_risk(self):
+        victim = self.root / "victim.txt"
+        victim.write_text("bye\n")
+        plan = Plan("delete on purpose",
+                    (Step("nuke", "delete_path", {"path": str(victim)},
+                          expect=Expectation(path_absent=(str(victim),))),),
+                    accept_irreversible=True)
+        out = self.orch().run(plan)
+        self.assertTrue(out.ok, out.format())
+        self.assertFalse(victim.exists())
+
+    def test_a_step_with_no_undo_is_reported_not_silently_skipped(self):
+        marker = str(self.root / "kept.txt")
+        one = Step("one", "write_file", {"path": marker, "content": "x\n"},
+                   expect=Expectation(path_exists=(marker,)))
+        two = Step("two", "read_file", {"path": marker},
+                   expect=Expectation(contains=("impossible",)))
+        out = self.orch().run(Plan("no undo", (one, two),
+                                   accept_irreversible=True))
+        self.assertFalse(out.ok)
+        self.assertEqual(out.entry("one").status, IRREVERSIBLE)
+        self.assertIn("one", out.irreversible)
+        self.assertTrue(Path(marker).exists(),
+                        "it was reported as left in place, so it must be")
+
+    def test_approval_is_asked_once_for_the_whole_plan(self):
+        asked = []
+        path_a, a = self.write("a", "a.txt")
+        path_b, b = self.write("b", "b.txt")
+
+        def approve(plan, review):
+            asked.append(review.needs_approval)
+            return True
+
+        out = self.orch(approve=approve).run(Plan("two writes", (a, b)))
+        self.assertTrue(out.ok, out.format())
+        self.assertEqual(len(asked), 1, "a human was asked twice")
+        self.assertEqual(len(asked[0]), 2)
+
+    def test_without_an_approval_hook_nothing_runs(self):
+        path, step = self.write("one", "one.txt")
+        out = self.orch(approve=None).run(Plan("write", (step,)))
+        self.assertFalse(out.ok)
+        self.assertFalse(Path(path).exists())
+
+    def test_a_role_without_the_capability_is_refused_at_plan_time(self):
+        path, step = self.write("one", "one.txt")
+        review = self.orch("readonly").review(Plan("write", (step,)))
+        self.assertFalse(review.ok)
+        self.assertTrue(any("not available" in p for p in review.problems),
+                        review.format())
+
+    def test_the_whole_run_shares_one_trace_id(self):
+        path, step = self.write("one", "one.txt")
+        out = self.orch().run(Plan("write", (step,)))
+        self.assertTrue(out.trace_id)
+        self.assertEqual(out.entry("one").trace_id, out.trace_id)
+
+    def test_the_ledger_is_sealed_in_the_event_log(self):
+        path, step = self.write("one", "one.txt")
+        self.orch().run(Plan("write", (step,)))
+        kinds = {e.type for e in self.log.events()}
+        self.assertIn("orchestrator.plan", kinds)
+        self.assertIn("orchestrator.step.done", kinds)
+        self.assertIn("orchestrator.done", kinds)
 
 
 if __name__ == "__main__":
