@@ -1321,7 +1321,9 @@ class UI:
         elif cmd == "/prompt":
             self._cmd_prompt(arg)
         elif cmd == "/mastermind":
-            self.print_info(self.agent.mastermind.format_status(), C["pink"])
+            self.print_info(
+                self.agent.mastermind.format_status(self.agent.cfg.prompt),
+                C["pink"])
         elif cmd == "/adherence":
             self._cmd_adherence(arg)
         elif cmd == "/promptlab":

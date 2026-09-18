@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from . import systemprompt
 from .adherence import AdherenceLedger
 from .kernel import EventLog
+from .spec import PromptIndex
 from .team import MAX_WORKERS
 
 # ---------------------------------------------------------------------------
@@ -493,6 +494,29 @@ class Mastermind:
         self.composer = CoherenceComposer()
         self.gate = PromptGate(log, self.vault, self.composer)
         self.adherence = AdherenceLedger(log)
+        self._indices: dict[str, tuple[str, PromptIndex]] = {}
+        # subagents look sections up in parallel; building an index twice
+        # is harmless but caching it twice would lose a rebuild
+        self._index_lock = threading.Lock()
+
+    def index(self, prompt_name: str) -> PromptIndex:
+        """The sealed prompt, cut into addressable sections (spec.py).
+
+        Built from the vault's sealed text and keyed by its fingerprint,
+        so the index can never drift from what the model was actually
+        sent: re-seal the prompt and the index is rebuilt with it."""
+        with self._index_lock:
+            text = self.vault.resolve(prompt_name)
+            fp = fingerprint(text)
+            cached = self._indices.get(prompt_name)
+            if cached is None or cached[0] != fp:
+                built = PromptIndex.build(prompt_name, text)
+                self._indices[prompt_name] = (fp, built)
+                self.log.append("prompt.indexed",
+                                {"name": prompt_name, "fingerprint": fp[:16],
+                                 **built.stats()}, actor="kernel")
+                return built
+            return cached[1]
 
     def status(self) -> MastermindState:
         """Live counts from the fold — the observation ledger."""
@@ -510,7 +534,7 @@ class Mastermind:
             section_counts=counts,
         )
 
-    def format_status(self) -> str:
+    def format_status(self, active: str | None = None) -> str:
         s = self.status()
         lines = ["MASTERMIND — the coherence ledger",
                  f"  dispatches {s.dispatches}   integrity restorations "
@@ -527,6 +551,18 @@ class Mastermind:
         lines.append("  the model only ever sees a sealed prompt with "
                      "coherent context composed beneath it — the gate is "
                      "the single door; nothing forces, everything coheres.")
+        if active:
+            try:
+                idx = self.index(active)
+                s_idx = idx.stats()
+                lines.append(f"  addressable: the active prompt "
+                             f"({active}) is indexed into "
+                             f"{s_idx['sections']} section(s) the model can "
+                             f"read back with spec_lookup — a long prompt "
+                             f"does not have to stay in mind to stay in "
+                             f"force")
+            except KeyError:
+                pass
         ad = self.adherence.status()
         if ad.score is None:
             lines.append("  adherence: no turn has exercised a directive "
@@ -743,6 +779,21 @@ if __name__ == "__main__":
             msgs, rep = mm.gate.dispatch(
                 "custom", [{"role": "user", "content": "hi"}])
             assert msgs[0]["content"] == "hello custom prompt v2"
+
+            # -- index: the prompt is addressable, and never stale ----------
+            systemprompt.register("t-idx", "# Alpha\nalpha rules here.\n"
+                                           "# Beta\nbeta rules here.\n")
+            idx = mm.index("t-idx")
+            assert [s.id for s in idx.sections] == ["alpha", "beta"]
+            assert mm.index("t-idx") is idx          # cached by fingerprint
+            assert idx.lookup("beta")[0].section.id == "beta"
+            # re-registering re-seals, and the index must follow the seal:
+            # an index that outlived its prompt would serve the model a
+            # rule that is no longer in the prompt it was sent
+            systemprompt.register("t-idx", "# Gamma\ngamma rules here.\n")
+            idx2 = mm.index("t-idx")
+            assert idx2 is not idx
+            assert [s.id for s in idx2.sections] == ["gamma"]
 
             # -- lineage: the ledger reflects everything above --------------
             s = mm.status()

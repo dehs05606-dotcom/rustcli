@@ -454,6 +454,7 @@ fullagent/
   config.py        providers, models, effort levels, paths
   systemprompt.py  the ONE home of every system prompt (single source)
   mastermind.py    prompt coherence: sealed vault, gate, composer, lineage
+  spec.py          the prompt, cut into addressable sections + BM25 lookup
   adherence.py     did the model follow it — clauses decided from the log
   promptlab.py     A/B two prompts on a scenario set, clause by clause
   tools.py         16 tools: files, shell, search, real-time web
@@ -643,6 +644,72 @@ turn that earned it. That line is addressed to *you*: nothing is appended
 to the conversation, nothing is re-sent, and the model is never told it
 was graded. `/adherence` is still there for the breakdown, but you should
 never have to type it to find out.
+
+### spec_lookup — a long prompt the model can address
+
+Placement fixes a 4k prompt. It cannot fix a 49k one. At iteration 120
+the clause governing the edit about to happen is forty thousand tokens
+back, and no reordering changes that. The usual answers are to shout (a
+compliance banner), to repeat (a reminder tail) or to trim. The first two
+are a second voice telling the model to obey the first; the third throws
+away what the author wrote.
+
+There is a fourth answer, and it is the one the rest of this codebase
+already uses for large state: make it addressable. `fullagent/spec.py`
+cuts the sealed prompt at **its own headings** — markdown, numbered,
+bold-only or all-caps — and builds a BM25 index over those sections, with
+heading terms weighted and a deliberately small stemmer so `claim`,
+`claims` and `claiming` are one word. The model reaches it through a
+tool:
+
+```
+spec_lookup(question="am I allowed to claim this succeeded?")
+→ Claiming success
+  Never claim success without evidence. A passing check AFTER the last
+  edit is evidence; anything else is a hope.
+```
+
+Four properties make it worth having:
+
+- **Verbatim.** The section comes back exactly as written. A summarised
+  directive is a different directive.
+- **Honest misses.** A question the prompt does not address returns
+  *"the prompt does not speak to it"*, never the closest thing on file. A
+  wrong section returned with full authority is worse than no section.
+- **Never stale.** The index is keyed by the prompt's sha256 fingerprint,
+  so re-sealing the prompt rebuilds it. An index that outlived its prompt
+  would hand the model a rule it was never sent.
+- **Not an injection.** Nothing is added to the conversation. The model
+  chooses to look, exactly as it chooses to read a file — and the lookup
+  lands at the depth where the rule is actually needed.
+
+Retrieval is lexical on purpose (rung 1): no embeddings, no network, no
+model call. A prompt lookup that could fail, cost money or vary between
+runs would be worse than none. A 49k prompt indexes into hundreds of
+sections and answers in microseconds. Every lookup seals a
+`prompt.lookup` event, so `/adherence` can tell you whether the model is
+actually consulting the prompt or only being sent it.
+
+### Declines are not violations
+
+"The newer models have more safety training, that's why they don't follow
+my prompt" is a testable claim, and it is usually wrong — but it should
+be settled with data rather than assertion. The ledger detects a decline
+(*"I can't help with that"*, *"that goes against my guidelines"*) and
+counts it **apart** from the adherence score:
+
+```
+declines: 3 turn(s) — the model said it would not do the thing, which is
+not the same as not following the prompt
+```
+
+The two have opposite fixes: a drifting model needs a clearer prompt, a
+declining one needs a different request. A single percentage cannot tell
+you which you are looking at, so the ledger does not try. The detector is
+tuned to leave ordinary reporting alone — *"I can't read the file because
+it does not exist"* is not a decline. Nothing is done with the count
+except show it to you: it is never fed back to the model, and there is
+nothing here that tries to talk a model out of its own safety behaviour.
 
 ### Promptlab — testing a prompt change like a code change
 

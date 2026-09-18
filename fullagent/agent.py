@@ -1910,6 +1910,38 @@ class Agent:
                 "command": {"type": "string"}},
                 "required": ["path", "command"]},
             measure_coverage, risk=RISK_CONFIRM)
+        def spec_lookup(question: str, sections: int = 3) -> str:
+            """Look a directive up in the active system prompt."""
+            name = self.cfg.prompt
+            try:
+                index = self.mastermind.index(name)
+            except KeyError:
+                return f"ERROR: prompt {name!r} is not sealed"
+            hits = index.lookup(question, k=max(1, min(int(sections), 5)))
+            self.log.append("prompt.lookup",
+                            {"prompt": name, "question": question[:200],
+                             "hits": [h.section.id for h in hits]},
+                            actor="model")
+            header = (f"{name} — {index.stats()['sections']} section(s), "
+                      f"{index.stats()['chars']:,} chars\n\n")
+            return header + index.format_hits(hits)
+
+        self.tools["spec_lookup"] = Tool(
+            "spec_lookup",
+            "Look up what YOUR OWN system prompt says about something, and "
+            "get the exact wording back. The prompt is long and was given "
+            "to you once, at the start; this reads the relevant part of it "
+            "again, now. Use it before an action the prompt is likely to "
+            "govern — editing, claiming something works, handling "
+            "credentials — and whenever you are unsure what it required. "
+            "Returns the matching section(s) verbatim, or says plainly "
+            "that the prompt does not address it. Args: question (what you "
+            "want the prompt's rule on), sections (how many, default 3).",
+            {"type": "object", "properties": {
+                "question": {"type": "string"},
+                "sections": {"type": "integer"}},
+                "required": ["question"]},
+            spec_lookup)
         self.tools["fuzz_target"] = Tool(
             "fuzz_target",
             "Property-based fuzzing of a function: generated + boundary + "

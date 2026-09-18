@@ -55,6 +55,12 @@ class SlotTestCase(unittest.TestCase):
             setattr(config, name, value)
         cls._home.cleanup()
 
+    def setUp(self):
+        # one event log per test: the ledger reads the whole file, so a
+        # shared log would let one test's lookups be counted in another's
+        config.EVENT_LOG_FILE = (Path(self._home.name)
+                                 / f"{self.id().rsplit('.', 1)[-1]}.jsonl")
+
 
 class ContextSlotTests(SlotTestCase):
 
@@ -189,6 +195,104 @@ class UserPromptTests(SlotTestCase):
             systemprompt.USER_PROMPTS.clear()
             systemprompt.PROMPTS.pop("default", None)
             systemprompt.PROMPTS.pop("user:default", None)
+
+
+class SpecLookupTests(SlotTestCase):
+    """The model reading its own prompt back, mid-turn, on demand.
+
+    Placement fixes a 4k prompt. It cannot fix a 49k one: by iteration
+    120 the clause governing the edit is forty thousand tokens back, and
+    no reordering changes that. Making the prompt addressable does — the
+    lookup happens at the depth where the rule is needed, in the author's
+    own words, because the model chose to look.
+    """
+
+    PROMPT = """You are a careful engineer. Work from evidence.
+
+# Reading before editing
+
+Never edit a file you have not read in this session.
+
+# Claiming success
+
+Never claim success without evidence. A passing check AFTER the last
+edit is evidence; anything else is a hope.
+
+# Credentials
+
+Never write a credential into a file that git tracks.
+"""
+
+    def agent_with_prompt(self):
+        config.PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.PROMPTS_DIR / "default.md").write_text(self.PROMPT)
+        self.addCleanup(systemprompt.USER_PROMPTS.clear)
+        self.addCleanup(lambda: systemprompt.PROMPTS.pop("default", None))
+        self.addCleanup(lambda: systemprompt.PROMPTS.pop("user:default",
+                                                         None))
+        self.addCleanup((config.PROMPTS_DIR / "default.md").unlink)
+        return Agent(config.Config())
+
+    def test_lookup_returns_the_authors_own_words_not_a_paraphrase(self):
+        agent = self.agent_with_prompt()
+        out = agent.tools["spec_lookup"].handler(
+            question="am I allowed to claim this succeeded?")
+        # verbatim, including the sentence that carries the actual rule —
+        # a summarised directive is a different directive
+        self.assertIn("A passing check AFTER the last", out)
+        self.assertIn("Claiming success", out)
+        # and it is a small answer, not the whole prompt back again
+        self.assertNotIn("Never write a credential", out)
+
+    def test_a_question_the_prompt_does_not_address_says_so(self):
+        agent = self.agent_with_prompt()
+        out = agent.tools["spec_lookup"].handler(
+            question="what is our quarterly revenue in euros")
+        self.assertIn("does not speak to it", out)
+
+    def test_every_lookup_is_sealed_and_counted(self):
+        agent = self.agent_with_prompt()
+        agent.tools["spec_lookup"].handler(question="credentials in git")
+        events = [e for e in agent.log.events() if e.type == "prompt.lookup"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].data["hits"], ["credentials"])
+        self.assertEqual(agent.mastermind.adherence.status().lookups, 1)
+
+    def test_the_index_follows_the_seal(self):
+        agent = self.agent_with_prompt()
+        name = agent.cfg.prompt
+        before = agent.mastermind.index(name)
+        self.assertIs(agent.mastermind.index(name), before)
+        systemprompt.register(name, "# Only rule\nbe brief.\n")
+        after = agent.mastermind.index(name)
+        # an index that outlived its prompt would hand the model a rule
+        # that is no longer in the prompt it was sent
+        self.assertIsNot(after, before)
+        self.assertEqual([s.id for s in after.sections], ["only-rule"])
+
+
+class DeclineTests(SlotTestCase):
+    """A refusal and a drift are different facts with different fixes."""
+
+    def test_a_decline_is_counted_but_never_scored_as_a_violation(self):
+        from fullagent.adherence import AdherenceLedger
+        agent = Agent(config.Config())
+        agent.log.append("assistant.message",
+                         {"text": "I can't help with that."}, actor="model")
+        ledger = AdherenceLedger(agent.log)
+        ledger.score_turn(0)
+        st = ledger.status()
+        self.assertEqual(st.declines, 1)
+        self.assertIsNone(st.score)      # not a failed directive
+        self.assertIn("declines: 1 turn(s)", ledger.format_status())
+
+    def test_ordinary_reporting_is_not_a_decline(self):
+        from fullagent.adherence import decline_note
+        for text in ("I can't read the file because it does not exist.",
+                     "The tests cannot run without a database.",
+                     "I will not guess — let me check the log first.",
+                     "Done. The parser handles nested quotes now."):
+            self.assertEqual(decline_note(text), "", text)
 
 
 if __name__ == "__main__":

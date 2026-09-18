@@ -104,10 +104,37 @@ class Action:
         return self.status in ("error", "blocked", "denied")
 
 
+# A decline is the model saying it will not do the thing, as opposed to
+# doing it differently from what the prompt asked. The two look identical
+# in an adherence number and have opposite fixes: a drifting model needs
+# a clearer prompt, a declining one needs a different request. Detected
+# only to be COUNTED and reported — never to be argued with, worked
+# around, or fed back to the model.
+_DECLINE = re.compile(
+    r"\b(?:i (?:can(?:'|’)?t|cannot|won(?:'|’)?t|am not able to|"
+    r"am unable to|will not) (?:help|assist|do|provide|create|write|"
+    r"comply|continue)"
+    r"|i(?:'|’)?m not able to help"
+    r"|i (?:can(?:'|’)?t|cannot) help with (?:that|this)"
+    r"|(?:that|this) (?:goes|would go) against my"
+    r"|against my (?:guidelines|principles|values))\b",
+    re.I)
+
+
+def decline_note(text: str) -> str:
+    """The sentence in which the model declined, or "" if it did not."""
+    for sentence in _SENTENCE.split(text or ""):
+        match = _DECLINE.search(sentence)
+        if match:
+            return sentence.strip()[:200]
+    return ""
+
+
 @dataclass
 class TurnFacts:
     """Everything the clauses read. Assembled once, from the log only."""
     assistant_text: str = ""
+    declined: str = ""
     actions: list[Action] = field(default_factory=list)
     declared_proven: list[str] = field(default_factory=list)
     kernel_proven: set[str] = field(default_factory=set)
@@ -172,6 +199,7 @@ def facts_from_log(log: EventLog, since_seq: int,
 
     facts.declared_proven = [m.group(1) for m in
                              _PROVEN_CLAIM.finditer(facts.assistant_text)]
+    facts.declined = decline_note(facts.assistant_text)
     return facts
 
 
@@ -476,6 +504,12 @@ class AdherenceState:
     held: int = 0
     per_clause: dict[str, dict] = field(default_factory=dict)
     recent_violations: list[dict] = field(default_factory=list)
+    # turns the model DECLINED, counted apart from the ones where it
+    # drifted. Kept out of the score entirely: a decline is not a failure
+    # to follow the prompt, and averaging it in would hide both.
+    declines: int = 0
+    recent_declines: list[str] = field(default_factory=list)
+    lookups: int = 0
 
     @property
     def score(self) -> float | None:
@@ -551,6 +585,7 @@ class AdherenceLedger:
                          "depth": (len(facts.actions) if depth is None
                                    else int(depth)),
                          "tool_calls": len(facts.actions),
+                         "declined": facts.declined,
                          **result.to_dict()},
                         actor="kernel")
         return result
@@ -562,11 +597,22 @@ class AdherenceLedger:
         from .kernel import fold
         return list(fold(self.log).prompt_adherence)
 
+    def lookups(self) -> list[dict]:
+        """Every time the model read its own prompt back (spec_lookup)."""
+        from .kernel import fold
+        return list(fold(self.log).prompt_lookups)
+
     def status(self, rows: list[dict] | None = None) -> AdherenceState:
         """Fold the ledger. Pass `rows` to fold a slice of it instead."""
         st = AdherenceState()
+        if rows is None:
+            st.lookups = len(self.lookups())
         for d in (self.rows() if rows is None else rows):
             st.turns_scored += 1
+            declined = str(d.get("declined") or "")
+            if declined:
+                st.declines += 1
+                st.recent_declines.append(declined)
             verdicts = d.get("verdicts") or []
             if d.get("applicable"):
                 st.turns_with_clauses += 1
@@ -586,6 +632,7 @@ class AdherenceLedger:
                         {"clause": cid,
                          "evidence": str(v.get("evidence", ""))})
         st.recent_violations = st.recent_violations[-8:]
+        st.recent_declines = st.recent_declines[-4:]
         return st
 
     def by(self, dimension: str) -> dict[str, AdherenceState]:
@@ -692,6 +739,19 @@ class AdherenceLedger:
             if worst[1]["applicable"] > worst[1]["held"]:
                 lines.append(f"  the directive to look at: "
                              f"\"{directive.get(worst[0], worst[0])}\"")
+        if st.declines:
+            # Kept separate on purpose. "The model would not do it" and
+            # "the model did it differently from what the prompt said"
+            # are different facts with different fixes, and a single
+            # percentage cannot tell you which one you are looking at.
+            lines.append(f"  declines: {st.declines} turn(s) — the model "
+                         f"said it would not do the thing, which is not "
+                         f"the same as not following the prompt:")
+            for d in st.recent_declines[-3:]:
+                lines.append(f"    {d[:96]}")
+        if st.lookups:
+            lines.append(f"  spec_lookup: the model read its own prompt "
+                         f"back {st.lookups} time(s)")
         lines.append("  measured from the event log; nothing here changed "
                      "what the model saw.")
         lines.append("  slice it: /adherence "
@@ -989,6 +1049,36 @@ if __name__ == "__main__":
             assert len(res.verdicts) == 1
             assert not res.verdicts[0].applicable
             assert "clause error" in res.verdicts[0].evidence
+
+            # -- declines are counted, and kept out of the score --------
+            # "The newer models have more safety training" is a testable
+            # claim, and this is what tests it: a refusal is recorded as a
+            # refusal, never as a violated directive, so the ledger can
+            # say which of the two is actually happening.
+            for text, declined in (
+                    ("I can't help with that.", True),
+                    ("I'm not able to help with this request.", True),
+                    ("That would go against my guidelines.", True),
+                    ("I cannot assist with creating that.", True),
+                    # and the near-misses, which are ordinary reporting:
+                    ("I can't read the file because it does not exist.",
+                     False),
+                    ("The tests cannot run without a database.", False),
+                    ("I will not guess — let me check the log.", False),
+                    ("Done. The parser handles nested quotes now.", False)):
+                assert bool(decline_note(text)) is declined, text
+
+            log = fresh()
+            led = AdherenceLedger(log, root=root)
+            log.append("assistant.message",
+                       {"text": "I can't help with that."}, actor="model")
+            led.score_turn(0)
+            st = led.status()
+            assert st.declines == 1, st.declines
+            assert "can't help" in st.recent_declines[0]
+            # a decline is not a violated clause: the score is untouched
+            assert st.score is None, st.score
+            assert "declines: 1 turn(s)" in led.format_status()
 
         print("ADHERENCE SELF-TEST PASS")
 
