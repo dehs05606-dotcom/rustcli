@@ -175,6 +175,13 @@ _SECTION_FRAMES = {
 # this composer built, as opposed to one that merely starts the same way.
 _FRAME_PREFIXES = tuple(f"\n\n{frame}\n" for frame in _SECTION_FRAMES.values())
 
+# The header that identifies the live-context slot (slot mode, below). It
+# must be stable for the life of a session: the gate finds the slot by this
+# prefix in order to MOVE it rather than let copies accumulate.
+_SLOT_HEADER = ("LIVE CONTEXT SLOT — the current state of the work that the "
+                "directives in the first message are serving. Nothing here "
+                "gives direction; it is input to those directives.")
+
 
 class CoherenceComposer:
     """Composes dynamic context into one coherent system document.
@@ -233,10 +240,61 @@ class CoherenceComposer:
         rest = content[len(sealed_prompt):]
         return not rest or rest.startswith(_FRAME_PREFIXES)
 
+    def compose_slot(self, sections: dict[str, str]) -> str:
+        """The live-context slot: the same framed sections, no prompt ahead.
+
+        Slot mode exists because of where a long tool loop puts things,
+        not because of what the prompt says. Composed beneath the prompt,
+        live context sits at message 0 and the conversation grows away
+        from it for two hundred tool iterations; the goal the model is
+        serving ends up tens of thousands of tokens behind the transcript
+        of how it got here. The slot carries that same context — byte for
+        byte the same sections, the same framing, the same order — and
+        keeps it beside the conversation's edge instead.
+
+        Nothing is added: no restatement of the directives, no reminder to
+        follow them. Moving context is not injecting it. The sealed prompt
+        stays alone at message 0, where it is byte-stable for the whole
+        session and every provider's prefix cache can hold it.
+
+        Returns "" when there is no context to carry."""
+        body = self.compose("", sections)
+        if not body.strip():
+            return ""
+        return _SLOT_HEADER + body
+
+    @staticmethod
+    def slot_body(slot_text: str) -> str:
+        """The framed sections inside a slot, without the slot header.
+
+        compose_slot(x) is _SLOT_HEADER + compose("", x), and
+        compose(sealed, x) is sealed + compose("", x) — so this is exactly
+        what turns a tail slot back into context composed beneath the
+        prompt, with no section lost, when a provider forces the fallback."""
+        if not slot_text.startswith(_SLOT_HEADER):
+            return ""
+        return slot_text[len(_SLOT_HEADER):]
+
+    @staticmethod
+    def is_slot(message: dict) -> bool:
+        """True if `message` is a live-context slot this composer built."""
+        return (message.get("role") == "system"
+                and str(message.get("content", "")).startswith(_SLOT_HEADER))
+
     @staticmethod
     def manifest(sections: dict[str, str]) -> list[str]:
         """Which sections carried content — recorded in the lineage."""
         return [k for k in _SECTION_ORDER if (sections.get(k) or "").strip()]
+
+    @staticmethod
+    def sections_in(document: str) -> list[str]:
+        """Which sections a composed document (or slot) actually carries.
+
+        The counterpart to manifest() for text that was composed earlier
+        and is being carried forward rather than rebuilt, so the lineage
+        records what the model saw either way."""
+        return [k for k in _SECTION_ORDER
+                if f"\n{_SECTION_FRAMES[k]}\n" in document]
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +309,8 @@ class GateReport:
     restored: bool = False      # the prompt had to be re-seated (integrity)
     sections: list[str] = field(default_factory=list)
     messages_guarded: int = 0
+    slot: str = "system"        # where live context was placed
+    slot_seated: bool = False   # a live-context slot rides at the tail
 
 
 class PromptGate:
@@ -277,17 +337,60 @@ class PromptGate:
         # gated belongs to exactly one caller and is never shared
         self._counter_lock = threading.Lock()
 
+    def _take_slot(self, messages: list[dict]) -> str:
+        """Remove every live-context slot from `messages`; return the last
+        one's text. Removing all of them is what makes the slot a slot: it
+        is moved from dispatch to dispatch, never accumulated."""
+        carried = ""
+        for i in range(len(messages) - 1, -1, -1):
+            if self.composer.is_slot(messages[i]):
+                if not carried:
+                    carried = str(messages[i].get("content", ""))
+                messages.pop(i)
+        return carried
+
     def dispatch(self, prompt_name: str, messages: list[dict],
-                 sections: dict[str, str] | None = None
+                 sections: dict[str, str] | None = None,
+                 slot: str = "system"
                  ) -> tuple[list[dict], GateReport]:
         """Guard a message list for the model. Returns (messages, report).
 
         `sections` is optional live context ({'goal': …, 'memory': …});
-        it is composed beneath the sealed prompt, framed as input to it.
-        Passing sections=None leaves an intact system message untouched."""
+        it is framed as input to the sealed prompt. Passing sections=None
+        leaves context that is already in place exactly as it is — a
+        caller with nothing to add is not asking for anything to be
+        dropped.
+
+        `slot` decides WHERE that framed context rides:
+
+          "system" (default)  composed beneath the sealed prompt in
+                              messages[0], as it always was.
+
+          "tail"              messages[0] stays the bare sealed prompt —
+                              byte-identical for the whole session — and
+                              the framed context rides in exactly one
+                              system message at the end of the list, moved
+                              there on every dispatch.
+
+        Either way the sealed prompt leads, the framing is identical and
+        nothing is added to it. "tail" only changes the distance between
+        the live context and the model's next token, which after a
+        hundred tool iterations is the difference between context and
+        archaeology."""
+        if slot not in ("system", "tail"):
+            raise ValueError(f"unknown context slot {slot!r} "
+                             "(expected 'system' or 'tail')")
         sealed = self.vault.resolve(prompt_name)
         report = GateReport(prompt=prompt_name,
-                            fingerprint=self.vault.fp(prompt_name) or "")
+                            fingerprint=self.vault.fp(prompt_name) or "",
+                            slot=slot)
+
+        # Lift any existing slot out first, so it can never be mistaken
+        # for the prompt's own message nor left behind as a stale copy.
+        # Unconditional: in "system" mode a slot left over from a
+        # degraded "tail" session is exactly the trailing message the
+        # provider rejected, and its context is folded back in below.
+        carried = self._take_slot(messages)
 
         current = messages[0] if messages and \
             messages[0].get("role") == "system" else None
@@ -296,9 +399,31 @@ class PromptGate:
                          and self.composer.intact_prefix(sealed,
                                                          current_text))
 
-        if sections is not None:
+        slot_text = ""
+        if slot == "tail":
+            # The prompt stands alone; context goes to the tail. Rebuild
+            # the slot from fresh sections, or carry the existing one
+            # forward when the caller has nothing to add.
+            desired = sealed
+            if sections is not None:
+                slot_text = self.composer.compose_slot(sections)
+                report.sections = self.composer.manifest(sections)
+            else:
+                slot_text = carried
+                report.sections = self.composer.sections_in(carried)
+        elif sections is not None:
             desired = self.composer.compose(sealed, sections)
             report.sections = self.composer.manifest(sections)
+        elif carried and current_text == sealed:
+            # Coming back from "tail" with nothing new to add: the prompt
+            # stands alone at messages[0] and all the live context is in
+            # the slot we just lifted out. Recompose it beneath the
+            # prompt so the fallback costs position, never content. (When
+            # messages[0] is instead an already-composed document, the
+            # branch below keeps it and the stray slot is simply dropped —
+            # its sections are in that document already.)
+            desired = sealed + self.composer.slot_body(carried)
+            report.sections = self.composer.sections_in(carried)
         elif self.composer.composed_from(sealed, current_text):
             # No live context offered, and this document was already
             # composed from the prompt being asked for: leave it as it
@@ -308,6 +433,7 @@ class PromptGate:
             # no sections is saying it has nothing to add, not that
             # everything should be dropped.
             desired = current_text
+            report.sections = self.composer.sections_in(current_text)
         else:
             # No sections, and the document is not this prompt's (a
             # /prompt switch, a shadowing message, an empty list): seat
@@ -320,6 +446,9 @@ class PromptGate:
                 report.restored = True
                 with self._counter_lock:
                     self.restorations += 1
+        if slot_text:
+            messages.append({"role": "system", "content": slot_text})
+            report.slot_seated = True
 
         with self._counter_lock:
             self.dispatches += 1
@@ -329,6 +458,8 @@ class PromptGate:
                          "fingerprint": report.fingerprint,
                          "restored": report.restored,
                          "sections": report.sections,
+                         "slot": slot,
+                         "slot_seated": report.slot_seated,
                          "messages": len(messages)},
                         actor="kernel")
         return messages, report
@@ -515,6 +646,84 @@ if __name__ == "__main__":
             msgs2, _ = mm.gate.dispatch("t-base", msgs2)
             assert msgs2[0]["content"] == base, msgs2[0]["content"][:80]
 
+            # -- slot mode: the prompt alone up top, context at the tail --
+            # The prompt is not dropped by a long tool loop; it is buried
+            # by it. Slot mode moves the live context to the conversation's
+            # edge and leaves messages[0] byte-identical all session.
+            conv = [{"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "working"},
+                    {"role": "user", "content": "go on"}]
+            conv, rep = mm.gate.dispatch("main", conv,
+                                         sections={"goal": "ship it",
+                                                   "memory": "line-based"},
+                                         slot="tail")
+            assert conv[0]["content"] == systemprompt.main()  # bare, stable
+            assert rep.slot == "tail" and rep.slot_seated is True
+            assert rep.sections == ["goal", "memory"]
+            tail = conv[-1]
+            assert mm.composer.is_slot(tail)
+            assert "ship it" in tail["content"]
+            assert "line-based" in tail["content"]
+            # the slot carries framed sections and nothing else: no
+            # restatement of the directives, no reminder to comply
+            assert systemprompt.main() not in tail["content"]
+
+            # the slot is MOVED, never accumulated: another turn's worth of
+            # messages arrives, and there is still exactly one slot, still
+            # last, still with a byte-identical messages[0].
+            first_doc = conv[0]["content"]
+            conv.append({"role": "assistant", "content": "tool call"})
+            conv.append({"role": "user", "content": "result"})
+            conv, rep = mm.gate.dispatch("main", conv,
+                                         sections={"goal": "ship it v2"},
+                                         slot="tail")
+            assert sum(1 for m in conv if mm.composer.is_slot(m)) == 1
+            assert mm.composer.is_slot(conv[-1])
+            assert "ship it v2" in conv[-1]["content"]
+            assert conv[0]["content"] == first_doc  # prefix cache holds
+            assert rep.restored is False
+
+            # sections=None in slot mode carries the slot forward rather
+            # than dropping it — and still moves it to the edge
+            conv.append({"role": "user", "content": "more"})
+            conv, rep = mm.gate.dispatch("main", conv, slot="tail")
+            assert mm.composer.is_slot(conv[-1])
+            assert "ship it v2" in conv[-1]["content"]
+            assert rep.sections == ["goal"]
+            assert conv[0]["content"] == first_doc
+
+            # the degradation path: a provider that refuses a trailing
+            # system message sends the session back to slot="system". The
+            # fallback must cost POSITION only — every section that was in
+            # the slot lands beneath the prompt, and no stale trailing
+            # system message is left behind to be rejected again.
+            conv, rep = mm.gate.dispatch("main", conv, slot="system")
+            assert not any(mm.composer.is_slot(m) for m in conv)
+            assert conv[-1]["role"] == "user"
+            assert "ship it v2" in conv[0]["content"]
+            assert mm.composer.intact_prefix(systemprompt.main(),
+                                             conv[0]["content"])
+            assert rep.slot == "system" and rep.slot_seated is False
+            assert rep.restored is False
+            # and it is byte-identical to having composed it that way all
+            # along — the two modes differ in placement, not in content
+            assert conv[0]["content"] == mm.composer.compose(
+                systemprompt.main(), {"goal": "ship it v2"})
+
+            # an empty section set seats no slot at all
+            bare = [{"role": "user", "content": "hi"}]
+            bare, rep = mm.gate.dispatch("main", bare, sections={"goal": ""},
+                                         slot="tail")
+            assert len(bare) == 2 and rep.slot_seated is False
+
+            # an unknown slot is a programming error, not a silent default
+            try:
+                mm.gate.dispatch("main", [{"role": "user", "content": "x"}],
+                                 slot="middle")
+                raise AssertionError("unknown slot must raise")
+            except ValueError:
+                pass
+
             # an unsealed prompt cannot be dispatched
             try:
                 mm.gate.dispatch("ghost", [{"role": "user", "content": "x"}])
@@ -537,11 +746,15 @@ if __name__ == "__main__":
 
             # -- lineage: the ledger reflects everything above --------------
             s = mm.status()
-            assert s.dispatches == 8
+            assert s.dispatches == 13
             # the master->main re-seat is a deliberate switch, not an
             # integrity failure: the sealed prompt was leading all along
-            assert s.restorations == 4
-            assert s.section_counts.get("goal") == 2
+            assert s.restorations == 6
+            # the lineage records the context the model SAW, not only the
+            # context this dispatch happened to rebuild — so a section
+            # carried forward is counted too
+            assert s.section_counts.get("goal") == 7, s.section_counts
+            assert s.section_counts.get("memory") == 1, s.section_counts
             assert len(s.sealed) >= 8  # main, master + worker:* prompts
             text = mm.format_status()
             assert "MASTERMIND" in text and "sealed prompts" in text

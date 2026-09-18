@@ -543,7 +543,7 @@ all deterministic Python:
 |---|---|
 | **PromptVault** | Every prompt is sealed with a sha256 fingerprint and recorded in the event log. The vault is the only source a model ever reads a prompt from; prompts registered at runtime are sealed on demand, and a changed prompt is re-sealed — no stale copy is ever served. |
 | **PromptGate** | The single door to the model. Every request (main agent, scout, worker, and each subsystem's one-shot call) passes `gate.dispatch()`, which guarantees `messages[0]` carries the sealed prompt byte-for-byte at the front, re-seats it if anything shadowed or corrupted it (an integrity restore — recorded, never punished), and seals a `prompt.dispatch` lineage event. There is no other way to reach the API. |
-| **CoherenceComposer** | Live context (constitution, goal, web mode, memory) is never appended as raw text that could compete with the prompt. It is composed beneath the sealed prompt as one coherent document: each section is framed as *input to* the prompt, provenance-tagged, ordered by authority, deduplicated. The prompt stays the only voice giving direction. Nothing is ever placed in front of the prompt, and no reminder trails it. |
+| **CoherenceComposer** | Live context (constitution, goal, web mode, memory) is never appended as raw text that could compete with the prompt. It is composed as one coherent document: each section is framed as *input to* the prompt, provenance-tagged, ordered by authority, deduplicated. The prompt stays the only voice giving direction. Nothing is ever placed in front of the prompt, and no reminder trails it. Where the framed context *rides* — beneath the prompt, or in one moved slot at the conversation's tail — is [the context slot](#the-context-slot--depth-decay-fixed-where-it-actually-happens). |
 | **AdherenceLedger** | `fullagent/adherence.py`. The three above record what the model was *sent*; this one records what it *did*. After every turn each clause — one directive from `systemprompt.py`, turned into a predicate over the turn's own events — is decided from the event log and sealed as a `prompt.adherence` event. |
 
 There is no enforcement layer — the system observes and records, it never
@@ -587,6 +587,62 @@ where the model writes. Measured with this repo's own estimator and the
 depth 50, and 2.5% at depth 200. If prompt influence decays with depth, it
 shows up as a gradient down those bands — and `/adherence depth` says so
 in as many words.
+
+### The context slot — depth decay, fixed where it actually happens
+
+Measuring the decay is half of it. The other half is that nothing in the
+old design could do anything about it, because the thing being buried was
+never the prompt alone — it was everything the prompt was *serving*. The
+goal contract, the recalled memory, the constitution: all composed
+beneath the sealed prompt at `messages[0]`, all left two hundred tool
+iterations behind by the time the model writes the answer they were
+supposed to shape.
+
+The fix is not to repeat the directives, and not to append a reminder.
+Both are a second voice telling the model to obey the first, and both are
+exactly what this system refuses to do. The fix is to stop putting the
+live context in the one place in the conversation that a long tool loop
+guarantees will be the furthest from the answer.
+
+Slot mode (`context_slot`, default `tail`) keeps the sealed prompt alone
+at `messages[0]` — byte-identical for the whole session — and carries the
+framed context in exactly **one** system message at the end of the list,
+moved there on every model call. Same sections, same framing, same
+authority order, same words; only the position changes:
+
+```
+  depth    tokens between the live context and the model's next token
+             composed (system)      slot (tail)
+      5                 1,510                0
+     50                15,100                0
+    200                60,400                0
+```
+
+Moving context is not injecting it. Nothing is added, nothing is
+restated, and the document the model reads is byte-for-byte what
+`compose()` always produced — which is what makes the fallback safe. A
+provider that rejects a trailing system message (`is_message_layout_error`)
+degrades *that session* to `context_slot="system"`, folds the slot's
+sections straight back beneath the prompt, seals a `prompt.slot_degraded`
+event and retries once. The fallback costs position, never content, and
+it never rewrites your saved preference for the next provider you run.
+
+### Your own prompt, and no command to run it
+
+Drop a `.md`, `.txt` or `.prompt` file into `~/.fullagent/prompts/` and it
+is registered and sealed at startup like a built-in. A file named
+`default` selects itself: running your own prompt should not require
+knowing a command. Size is not the problem it is usually assumed to be —
+a 49k prompt is sealed, dispatched and cached exactly like the 4.2k one,
+and lands at `messages[0]` with nothing in front of it either way.
+
+Adherence needs no command either. Every turn's verdicts ride on the turn
+itself, and a clause that did not hold prints under that turn's stats —
+the directive in `systemprompt.py`'s own words, and the evidence — on the
+turn that earned it. That line is addressed to *you*: nothing is appended
+to the conversation, nothing is re-sent, and the model is never told it
+was graded. `/adherence` is still there for the breakdown, but you should
+never have to type it to find out.
 
 ### Promptlab — testing a prompt change like a code change
 

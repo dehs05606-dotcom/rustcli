@@ -3140,8 +3140,41 @@ class UI:
             tout = turn.usage.get("completion_tokens", 0) or 0
             if tin or tout:
                 parts.append(f"{tin}→{tout} tokens")
+        ad = getattr(turn, "adherence", None) or {}
+        applicable = ad.get("applicable") or 0
+        if applicable:
+            held = applicable - (ad.get("violations") or 0)
+            parts.append(f"prompt {held}/{applicable}")
         t = Text("  ·  ".join(parts), style=C["dim"])
         self.console.print(t)
+        self._print_turn_adherence(ad)
+
+    def _print_turn_adherence(self, ad: dict) -> None:
+        """Say, on the turn it happened, which directive did not hold.
+
+        This is the whole reason the ledger exists, and it is why it
+        needs no command: a number you have to go and ask for is a number
+        nobody ever asks for, and by the time you did the turn that
+        earned it would be twenty turns back. The line is addressed to
+        YOU, not to the model — nothing is appended to the conversation,
+        nothing is re-sent, the model is never told it was graded. The
+        measurement stays a measurement."""
+        violations = [v for v in (ad.get("verdicts") or [])
+                      if v.get("applicable") and not v.get("held")]
+        if not violations:
+            return
+        ledger = self.agent.mastermind.adherence
+        for v in violations[:3]:
+            directive = ledger.directive_of(v.get("clause", ""))
+            self.console.print(Text(f"  ⚑ {directive}", style=C["yellow"]))
+            evidence = (v.get("evidence") or "").strip()
+            if evidence:
+                self.console.print(Text(f"    {evidence[:160]}",
+                                        style=C["dim"]))
+        if len(violations) > 3:
+            self.console.print(
+                Text(f"  ⚑ +{len(violations) - 3} more (/adherence)",
+                     style=C["dim"]))
 
     def _start_spinner(self) -> None:
         # generation token: back-to-back turns used to leak tick threads

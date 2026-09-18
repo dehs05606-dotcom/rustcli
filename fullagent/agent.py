@@ -39,7 +39,7 @@ from .autopilot import AutoPilot, RouteDecision
 from .cassette import Cassette
 from .client import (APIError, TurnCancelled, assistant_message,
                      chat_blocking, chat_stream, estimate_tokens,
-                     is_context_overflow)
+                     is_context_overflow, is_message_layout_error)
 from .config import Config, Effort, Model, Provider, PROVIDERS, model_by_id
 from .attention import AttentionEconomy
 from .bandit import BanditRouter
@@ -148,6 +148,12 @@ class Turn:
     # seated once at the top of a turn and never re-seated inside it, so
     # this is how far the directives ended up from the generation point.
     iterations: int = 0
+    # this turn's verdicts against the prompt's own directives, as
+    # AdherenceLedger.score_turn() sealed them (adherence.py). Carried on
+    # the turn so the UI can surface a violation the moment it happens —
+    # a measurement you have to run a command to see is a measurement
+    # nobody runs.
+    adherence: dict = field(default_factory=dict)
     timestamp: str = field(
         default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
 
@@ -244,10 +250,25 @@ class Agent:
         # Temporal kernel + the nine subsystems
         config.ensure_dirs()
         self.log = EventLog(config.EVENT_LOG_FILE, session=self.session_id)
+        # Your own prompts, from <APP_DIR>/prompts/, registered BEFORE the
+        # vault is built so they are sealed at startup like the built-ins
+        # rather than on first use. A file named `default` selects itself:
+        # running your own prompt should not require knowing a command.
+        self.user_prompts = systemprompt.load_user_prompts(
+            config.PROMPTS_DIR)
+        chosen = systemprompt.active_user_default()
+        if chosen and self.cfg.prompt == "main":
+            self.cfg.prompt = chosen
         # Mastermind: hash-sealed prompts + the single gate to the model.
         # Built before messages so the very first system prompt is sealed
         # and dispatched through the gate, not assembled by hand.
         self.mastermind = Mastermind(self.log)
+        # Where live context rides (see config.Config.context_slot). Held
+        # on the session, not the saved config: a provider that rejects a
+        # trailing system message degrades THIS session to "system" and
+        # says so, without rewriting the user's preference for the next
+        # provider they run.
+        self._context_slot = self.cfg.context_slot
         self.messages: list[dict] = []
         self._reseat_system_prompt()
         self.store = SnapshotStore(config.APP_DIR / "store")
@@ -446,7 +467,8 @@ class Agent:
         the sealed prompt, composes any live context sections beneath it,
         and seals a prompt.dispatch lineage event."""
         self.messages, _ = self.mastermind.gate.dispatch(
-            self.cfg.prompt, self.messages, sections=sections)
+            self.cfg.prompt, self.messages, sections=sections,
+            slot=self._context_slot)
 
     def state(self):
         """Live projection of the event log (cost, goal, dead-ends, …)."""
@@ -740,10 +762,10 @@ class Agent:
             # runs AFTER the turn is finished and touches nothing: the
             # model has already answered, and no clause can reach back
             # into what it saw. Observation, never enforcement.
-            self.mastermind.adherence.score_turn(
+            turn.adherence = self.mastermind.adherence.score_turn(
                 self._turn_start_seq, prompt=self.cfg.prompt,
                 model=self.model.id, effort=self.cfg.effort,
-                depth=iterations)
+                depth=iterations).to_dict()
         except Exception:
             pass  # a measurement must never be able to break a turn
         try:
@@ -1065,6 +1087,18 @@ class Agent:
                                      on_tool_args=on_tool_args,
                                      should_cancel=should_cancel,
                                      on_overflow=self._overflow_shrink)
+            elif (self._context_slot == "tail"
+                  and is_message_layout_error(str(e))):
+                # This provider will not take a trailing system message.
+                # Degrade the session to composing context beneath the
+                # prompt, re-seat, and retry once. The prompt itself is
+                # unaffected either way — only where its live context sits.
+                on_status("context slot -> system")
+                self._context_slot = "system"
+                self.log.append("prompt.slot_degraded",
+                                {"reason": str(e)[:200]}, actor="kernel")
+                self._reseat_system_prompt()
+                result = _attempt()
             elif e.status == 400 and "tool" in msg and schemas:
                 on_status("retrying (no tools)")
                 result = chat_stream(self.provider, self.model, self.effort,

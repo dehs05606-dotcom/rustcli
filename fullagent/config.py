@@ -48,6 +48,10 @@ APP_DIR = _pick_app_dir()
 CONFIG_FILE = APP_DIR / "config.json"
 HISTORY_FILE = APP_DIR / "history"
 SESSIONS_DIR = APP_DIR / "sessions"
+# Your own system prompts live here: drop a .md/.txt in and it is
+# registered under its filename. A file named `default` is selected
+# automatically — see systemprompt.load_user_prompts().
+PROMPTS_DIR = APP_DIR / "prompts"
 EVENT_LOG_FILE = APP_DIR / "eventlog.jsonl"
 
 DEFAULT_TIMEOUT = 300.0
@@ -200,6 +204,13 @@ class Config:
     theme: str = "dracula"
     # which system prompt to send: "main" (compact) or "master" (130k+)
     prompt: str = "main"
+    # where live context rides: "tail" keeps the sealed prompt alone and
+    # byte-stable at messages[0] and moves the goal/memory/constitution
+    # sections to the end of the message list on every model call, so a
+    # long tool loop cannot bury them. "system" composes them beneath the
+    # prompt, as before. A provider that rejects the layout degrades this
+    # session to "system" automatically — see Agent._complete.
+    context_slot: str = "tail"
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -210,7 +221,7 @@ class Config:
             if not isinstance(data, dict):
                 data = {}
             for k in ("model_id", "effort", "auto_approve", "show_reasoning",
-                      "theme", "prompt"):
+                      "theme", "prompt", "context_slot"):
                 if k not in data:
                     continue
                 if k in ("auto_approve", "show_reasoning"):
@@ -223,7 +234,8 @@ class Config:
                     setattr(cfg, k, data[k])
             cfg.extra = {k: v for k, v in data.items()
                          if k not in ("model_id", "effort", "auto_approve",
-                                      "show_reasoning", "theme", "prompt")}
+                                      "show_reasoning", "theme", "prompt",
+                                      "context_slot")}
         except (OSError, ValueError):
             pass
         if model_by_id(cfg.model_id) is None:
@@ -232,6 +244,8 @@ class Config:
             cfg.effort = DEFAULT_EFFORT
         if not isinstance(cfg.prompt, str) or not cfg.prompt:
             cfg.prompt = "main"
+        if cfg.context_slot not in ("tail", "system"):
+            cfg.context_slot = "tail"
         return cfg
 
     def save(self) -> None:
@@ -244,6 +258,7 @@ class Config:
                 "show_reasoning": self.show_reasoning,
                 "theme": self.theme,
                 "prompt": self.prompt,
+                "context_slot": self.context_slot,
             }
             data.update(self.extra)
             # atomic write: a crash mid-write must never leave truncated
@@ -259,7 +274,8 @@ def ensure_dirs() -> None:
     """Create every directory the app writes into. Called at startup AND
     before individual writes, so a deleted home dir heals itself."""
     for d in (APP_DIR, SESSIONS_DIR, APP_DIR / "memory",
-              APP_DIR / "skills", APP_DIR / "store"):
+              APP_DIR / "skills", APP_DIR / "store",
+              APP_DIR / "prompts"):
         try:
             d.mkdir(parents=True, exist_ok=True)
         except OSError:

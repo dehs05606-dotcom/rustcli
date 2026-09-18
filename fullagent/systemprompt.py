@@ -352,6 +352,75 @@ def names() -> list[str]:
     return sorted(PROMPTS)
 
 
+# ---------------------------------------------------------------------------
+# User prompts — your own prompt, as a file
+# ---------------------------------------------------------------------------
+# Until now the only way to run your own system prompt was to edit MAIN in
+# this file, or to smuggle it in as project.txt and have it appended under
+# MAIN as a "specification". Neither is a prompt you own; both are edits to
+# the program. A prompt is content, so it belongs in a file you control.
+#
+# Drop a .md or .txt in <APP_DIR>/prompts/ and it is registered under its
+# filename, sealed by the vault like every built-in, and selectable. A file
+# named `default` is special: it becomes the active prompt on its own, so
+# using your own prompt takes no command at all — the file IS the setting.
+
+USER_PROMPT_SUFFIXES = (".md", ".txt", ".prompt")
+
+#: Registered names that came from a user file, newest load wins.
+USER_PROMPTS: dict[str, str] = {}
+
+#: The filename (without suffix) that is selected automatically.
+DEFAULT_USER_PROMPT = "default"
+
+
+def load_user_prompts(directory) -> dict[str, str]:
+    """Register every prompt file in `directory`. Returns {name: path}.
+
+    Unreadable or empty files are skipped rather than raised on: a typo in
+    one file must not stop the agent from starting, and an empty file is
+    an accident every time — seating it would leave the model promptless,
+    which is the one outcome this module exists to prevent."""
+    from pathlib import Path
+    found: dict[str, str] = {}
+    base = Path(directory)
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return found
+    for path in entries:
+        if not path.is_file() or path.suffix.lower() not in \
+                USER_PROMPT_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not text.strip():
+            continue
+        name = path.stem
+        if name in PROMPTS and name not in USER_PROMPTS:
+            # never let a file shadow a built-in or an internal:* prompt
+            name = f"user:{name}"
+        register(name, text)
+        USER_PROMPTS[name] = str(path)
+        found[name] = str(path)
+    return found
+
+
+def active_user_default() -> str | None:
+    """The user prompt that should be selected with no command given.
+
+    A file called `default` is an unambiguous statement of intent — the
+    user put it there and named it that — so it outranks the built-in
+    `main`. Anything else they must select, because guessing which of
+    several files they meant would be worse than asking."""
+    for candidate in (DEFAULT_USER_PROMPT, f"user:{DEFAULT_USER_PROMPT}"):
+        if candidate in USER_PROMPTS:
+            return candidate
+    return None
+
+
 if __name__ == "__main__":
     # sanity: every builder returns a non-empty prompt, and with_system
     # always leaves the system prompt at position 0.
@@ -424,6 +493,35 @@ if __name__ == "__main__":
     assert not _offenders, (
         "inline system prompt(s) outside systemprompt.py — every prompt "
         "belongs here so it can be sealed and gated: " + ", ".join(_offenders))
+
+    # ------------------------------------------------------------------
+    # user prompts: a file is a prompt, and `default` selects itself
+    # ------------------------------------------------------------------
+    import tempfile as _tf
+    from pathlib import Path as _P2
+    with _tf.TemporaryDirectory() as _td:
+        _d = _P2(_td)
+        (_d / "mine.md").write_text("MY OWN PROMPT", encoding="utf-8")
+        (_d / "default.txt").write_text("MY DEFAULT PROMPT", encoding="utf-8")
+        (_d / "empty.md").write_text("   \n", encoding="utf-8")
+        (_d / "notes.rst").write_text("not a prompt suffix", encoding="utf-8")
+        (_d / "main.md").write_text("SHADOWS A BUILT-IN", encoding="utf-8")
+        _loaded = load_user_prompts(_d)
+        assert "mine" in _loaded and get("mine") == "MY OWN PROMPT"
+        assert "default" in _loaded
+        assert active_user_default() == "default"
+        # empty files and unknown suffixes are skipped, never seated
+        assert "empty" not in _loaded and "notes" not in _loaded
+        # a file can never shadow a built-in
+        assert "main" not in _loaded and "user:main" in _loaded
+        assert get("main") == MAIN
+        assert get("user:main") == "SHADOWS A BUILT-IN"
+        # an unreadable directory is not an error — the agent still starts
+        assert load_user_prompts(_d / "nope") == {}
+    for _k in list(USER_PROMPTS):
+        PROMPTS.pop(_k, None)
+        USER_PROMPTS.pop(_k, None)
+    assert active_user_default() is None
 
     note = "with spec" if spec_present() else "no project.txt — MASTER = MAIN"
     print(f"SYSTEMPROMPT SELF-TEST PASS  "

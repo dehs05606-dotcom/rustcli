@@ -498,6 +498,17 @@ class AdherenceLedger:
         self.clauses = clauses
         self._root = root
 
+    def directive_of(self, clause_id: str) -> str:
+        """The prompt's own words behind a clause id.
+
+        What a violation is worth saying out loud is the directive, not
+        the identifier: "read-before-edit" names a rule, the directive IS
+        the rule, in the language systemprompt.py wrote it in."""
+        for clause in self.clauses:
+            if clause.id == clause_id:
+                return clause.directive
+        return clause_id
+
     @property
     def root(self) -> Path:
         """Where a relative path in a citation is resolved from.

@@ -464,6 +464,32 @@ def is_context_overflow(message: str) -> bool:
     return any(m in low for m in _OVERFLOW_MARKERS)
 
 
+# A backend that will not accept the message layout we sent — most often
+# a chat template that allows only one system message, or only one at the
+# front. Providers word this differently, so match on the shape of the
+# complaint rather than any one vendor's phrasing.
+_LAYOUT_MARKERS = (
+    "system message", "system messages", "system role",
+    "only one system", "first message must", "must be the first",
+    "role must be", "invalid role", "unsupported role",
+    "must alternate", "consecutive messages", "message order",
+    "last message must",
+)
+
+
+def is_message_layout_error(message: str) -> bool:
+    """True when the backend rejected HOW the messages were arranged.
+
+    This is the signal that a layout this client chose — a live-context
+    message seated after the system prompt — is not one this provider
+    accepts. It is recoverable by re-arranging and re-sending, which is
+    why it is worth telling apart from every other 400."""
+    low = message.lower()
+    if is_context_overflow(low):
+        return False
+    return any(m in low for m in _LAYOUT_MARKERS)
+
+
 def _parse_overflow(message: str) -> dict | None:
     """Extract real token counts from a backend overflow error. Returns a
     dict with any of: window, input_tokens, completion_tokens, total."""
