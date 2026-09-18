@@ -668,12 +668,37 @@ def apply_patch(patch: str) -> str:
 # Web
 # ---------------------------------------------------------------------------
 
+_UA = "Mozilla/5.0 (X11; Linux x86_64) FullAgent/1.0"
+MAX_REDIRECTS = 5
+
+
 def web_fetch(url: str) -> str:
-    """Fetch a URL and return its text content."""
+    """Fetch a URL and return its text content.
+
+    The policy layer checks the URL before this runs, but it only sees the
+    URL the model asked for. A 302 to 169.254.169.254 would arrive after
+    that check, so every hop is re-checked here against the same rule.
+    """
     import requests
+    from urllib.parse import urljoin
+
+    from .toolpolicy import host_allowed
+
+    problem = host_allowed(url)
+    if problem:
+        return f"ERROR: refused: {problem}"
     try:
-        resp = requests.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) FullAgent/1.0"})
+        for _ in range(MAX_REDIRECTS + 1):
+            resp = requests.get(url, timeout=30, allow_redirects=False,
+                                headers={"User-Agent": _UA})
+            if not (resp.is_redirect or resp.is_permanent_redirect):
+                break
+            url = urljoin(resp.url, resp.headers.get("location", ""))
+            problem = host_allowed(url)
+            if problem:
+                return f"ERROR: refused redirect: {problem}"
+        else:
+            return f"ERROR: more than {MAX_REDIRECTS} redirects"
         resp.raise_for_status()
     except Exception as e:
         return f"ERROR: {e}"

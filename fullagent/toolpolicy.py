@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Capabilities. Deliberately few: a vocabulary an operator can hold in
 # their head is one they will actually configure correctly.
@@ -80,6 +81,19 @@ PATH_ARGS: dict[str, tuple[str, ...]] = {
     "search_files": ("path",), "glob_files": ("path",),
 }
 
+# Hosts that are never fetched, whatever an allow-list says. These are
+# the SSRF targets: the cloud metadata service hands credentials to
+# anything on the box that asks, and loopback reaches services that
+# believe a local caller is already trusted. A deny an allow-list can
+# override is not a deny, so this runs first and cannot be configured
+# away.
+BLOCKED_HOSTS = frozenset({
+    "169.254.169.254", "metadata.google.internal", "metadata",
+    "localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]",
+})
+BLOCKED_SCHEMES = frozenset({"file", "gopher", "ftp", "data", "dict"})
+PRIVATE_PREFIXES = ("10.", "192.168.", "127.", "169.254.", "0.")
+
 DESTRUCTIVE_RE = re.compile(
     r"\brm\s+(?:-\w*[rf]\w*\s+)+|\bgit\s+push\s+(?:--force|-f)\b|"
     r"\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-\w*[fd]\w*\b|"
@@ -97,6 +111,12 @@ class Role:
     ask_capabilities: frozenset[str] = frozenset()
     ceilings: dict[str, int] = field(default_factory=dict)
     allow_destructive_commands: bool = False
+    # Hosts this role may reach. Empty means "no allow-list configured",
+    # which permits any host not already blocked above — the shipped
+    # default, because an empty allow-list that denied everything would
+    # break web_fetch for every existing user on upgrade. Set it to lock
+    # a session down.
+    allowed_hosts: tuple[str, ...] = ()
 
     def holds(self, capability: str) -> bool:
         """Whether the role has this capability at all.
@@ -141,6 +161,53 @@ ROLES: dict[str, Role] = {
 }
 
 DEFAULT_ROLE = "developer"
+
+
+def _is_private_host(host: str) -> bool:
+    if host.startswith(PRIVATE_PREFIXES):
+        return True
+    # 172.16.0.0/12 is private; 172.15 and 172.32 are not, so the second
+    # octet has to be read rather than prefix-matched.
+    if host.startswith("172."):
+        parts = host.split(".")
+        if len(parts) > 1 and parts[1].isdigit():
+            return 16 <= int(parts[1]) <= 31
+    return False
+
+
+def _host_of(url: str) -> tuple[str, str]:
+    """(scheme, hostname) for a URL, lowercased, credentials discarded."""
+    try:
+        parsed = urlparse(url.strip())
+        host = (parsed.hostname or "").lower()
+    except (ValueError, AttributeError):
+        return "", ""
+    return (parsed.scheme or "").lower(), host
+
+
+def host_allowed(url: str, allowed: tuple[str, ...] = ()) -> str:
+    """'' when the URL may be fetched, else the reason it may not.
+
+    The order is not negotiable: scheme and blocked hosts are checked
+    before any allow-list, so configuring `allowed_hosts` can never
+    re-open the metadata endpoint. The host is read from the parsed URL
+    rather than the raw string, so `https://user:pw@169.254.169.254/` is
+    judged on the host it actually reaches.
+    """
+    scheme, host = _host_of(url)
+    if not scheme or not host:
+        return f"not a fetchable URL: {url[:80]}"
+    if scheme in BLOCKED_SCHEMES or scheme not in ("http", "https"):
+        return f"scheme '{scheme}' is not fetchable"
+    if host in BLOCKED_HOSTS or _is_private_host(host):
+        return f"host '{host}' is loopback, link-local or private"
+    if allowed:
+        for pattern in allowed:
+            pattern = pattern.lower().lstrip(".")
+            if host == pattern or host.endswith("." + pattern):
+                return ""
+        return f"host '{host}' is not on the allow-list"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -270,6 +337,13 @@ class ToolPolicy:
                     self.role.name, capability=PROC_EXEC,
                     rule="command-policy"))
 
+        if NET_FETCH in needed and args.get("url"):
+            problem = host_allowed(str(args["url"]), self.role.allowed_hosts)
+            if problem:
+                return self._seal(Decision(
+                    DENY, tool_name, problem, self.role.name,
+                    capability=NET_FETCH, rule="network-allow-list"))
+
         ceiling = self._ceiling_violation(tool_name)
         if ceiling:
             return self._seal(Decision(DENY, tool_name, ceiling,
@@ -345,6 +419,12 @@ def from_config(data: dict, log=None) -> ToolPolicy:
         role = Role(role.name, role.capabilities & wanted, role.roots,
                     role.ask_capabilities & wanted, role.ceilings,
                     role.allow_destructive_commands)
+    hosts = data.get("allowed_hosts")
+    if isinstance(hosts, list):
+        role = Role(role.name, role.capabilities, role.roots,
+                    role.ask_capabilities, role.ceilings,
+                    role.allow_destructive_commands,
+                    tuple(str(h) for h in hosts))
     roots = data.get("roots")
     roots_t = tuple(str(r) for r in roots) if isinstance(roots, list) else None
     return ToolPolicy(role=role, log=log, roots=roots_t)
@@ -441,6 +521,40 @@ if __name__ == "__main__":
         widen = from_config({"role": "readonly", "roots": [str(root)],
                              "capabilities": list(ALL_CAPABILITIES)})
         assert widen.evaluate("run_command", {"command": "ls"}).denied
+
+        # --- network: SSRF targets denied before any allow-list -------
+        assert host_allowed("https://example.com/x") == ""
+        assert host_allowed("http://169.254.169.254/latest/meta-data/")
+        assert host_allowed("http://localhost:8080/admin")
+        assert host_allowed("http://127.0.0.1/")
+        assert host_allowed("http://10.0.0.5/internal")
+        assert host_allowed("http://172.16.0.9/")
+        assert host_allowed("http://172.31.255.1/")
+        assert host_allowed("http://172.15.0.1/") == ""     # not private
+        assert host_allowed("http://172.32.0.1/") == ""     # not private
+        assert host_allowed("file:///etc/passwd")
+        # credentials in the URL must not disguise the real host
+        assert host_allowed("https://user:pw@169.254.169.254/")
+        # an allow-list narrows, and cannot re-open a blocked host
+        locked = ("example.com",)
+        assert host_allowed("https://api.example.com/v1", locked) == ""
+        assert host_allowed("https://evil.test/", locked)
+        assert host_allowed("http://169.254.169.254/", ("169.254.169.254",))
+        # a suffix match must not accept a lookalike domain
+        assert host_allowed("https://notexample.com/", locked)
+
+        netted = ToolPolicy(Role("net", frozenset({NET_FETCH}),
+                                 allowed_hosts=("example.com",)),
+                            log=log, roots=(str(root),))
+        assert netted.evaluate("web_fetch",
+                               {"url": "https://example.com/a"}).allowed
+        blocked_call = netted.evaluate(
+            "web_fetch", {"url": "http://169.254.169.254/"})
+        assert blocked_call.denied
+        assert blocked_call.rule == "network-allow-list", blocked_call.to_dict()
+        assert from_config({"role": "readonly",
+                            "allowed_hosts": ["docs.python.org"]}
+                           ).role.allowed_hosts == ("docs.python.org",)
 
         assert any(e.type == "policy.decision" for e in log.events())
         assert "TOOL POLICY" in dev.format_status()
