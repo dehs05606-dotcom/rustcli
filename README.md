@@ -78,14 +78,23 @@ without artificial animation delays.
 
 ## Install
 
-Pure Python — no build step, nothing to compile. Python 3.9+ is the only
-requirement.
+Installing from source needs nothing but Python 3.9+ — no compiler, no
+build step. For a machine with no Python on it at all, a prebuilt Linux
+x86_64 binary is published on the releases page instead.
 
 | Platform | Install |
 |---|---|
 | Linux / macOS | `curl -fsSL https://raw.githubusercontent.com/dehs05606-dotcom/rustcli/main/install.sh \| bash` |
 | Termux (Android) | `curl -fsSL https://raw.githubusercontent.com/dehs05606-dotcom/rustcli/main/install-termux.sh \| bash` |
 | Any OS | `pip install git+https://github.com/dehs05606-dotcom/rustcli.git` |
+| Linux x86_64, no Python | download `fullagent` from [Releases](https://github.com/dehs05606-dotcom/rustcli/releases/latest), then `chmod +x fullagent && ./fullagent` |
+
+### Building the binary yourself
+
+`./build-binary.sh` freezes the checkout into one file at `dist/fullagent`
+with PyInstaller. It is native to the machine that builds it — there is no
+cross-compilation, and Termux cannot run a glibc binary at all, so the
+source install stays the path on Android.
 
 ## Models
 
@@ -94,6 +103,7 @@ requirement.
 | Union Alpha | Kilo Code | 262k | ✓ | — |
 | Atria Dawn Preview | Kios API | 262k | ✓ | — |
 | Qwen3.8 Max *(free)* | xKiro | **1M** | ✓ | ✓ |
+| DeepSeek V4 Flash 0731 *(paid)* | xKiro | **1M** | ✓ | ✓ |
 
 Switch with `/model`. Keys resolve in this order, so your own always
 wins: `<PROVIDER>_API_KEY` in the environment, then
@@ -409,7 +419,7 @@ tokens, temperature, and reasoning effort.
 
 ## Models & providers
 
-Both **Kilo Code** and **Kios API** are available. The default model is
+**Kilo Code**, **Kios API** and **xKiro** are available. The default model is
 Union Alpha; saved selections of removed models fall back to it. Custom
 providers and `models.json` loading are no longer supported.
 
@@ -418,10 +428,15 @@ providers and `models.json` loading are no longer supported.
   supported; reasoning parameters omitted
 - Kios — Base URL: `https://kiosapi.com/v1`; model `atria-dawn-preview`
   (OpenAI-compatible chat + tool calling)
+- xKiro — Base URL: `https://api.xkiro.com/v1` (the client appends
+  `/chat/completions`); models `qwen/qwen3.8-max:free` and
+  `deepseek/deepseek-v4-flash-0731`, both tool calling + reasoning
 
+One last-resort xKiro key ships in `config.py`, so that provider works with
+nothing to set up. It is readable by anyone who can read this repository —
+treat it as a shared demo key, never as a secret. Your own key always wins:
 
-No API keys are embedded in source. Configure a key before starting:
-
+```bash
 export KIOS_API_KEY='your-kios-api-key'
 python main.py
 ```
@@ -430,15 +445,17 @@ python main.py
 |---|---|---|
 | Kilo Code | `https://api.kilo.ai/api/gateway` | `stealth/union-alpha` |
 | Kios API | `https://kiosapi.com/v1` | `atria-dawn-preview` |
+| xKiro | `https://api.xkiro.com/v1` | `qwen/qwen3.8-max:free`, `deepseek/deepseek-v4-flash-0731` |
 
-`/models list` shows both models; `/model` or Ctrl+T opens the selector.
+`/models list` shows every model; `/model` or Ctrl+T opens the selector.
 The turn always runs on your selected model; failover happens only on a
 provider outage (see `/health`).
-Save the key instead in `~/.fullagent/kilo_api_key` or
-`~/.fullagent/kios_api_key` (permissions `600`); env vars take precedence.
-Keep keys outside the repository. Previously embedded credentials may remain
-in git history and should be rotated; removing them from current source does
-not revoke them.
+Save the key instead in `~/.fullagent/kilo_api_key`,
+`~/.fullagent/kios_api_key` or `~/.fullagent/xkiro_api_key` (permissions
+`600`); env vars take precedence. A key committed to this repository is
+visible to everyone who can read it, and stays in git history after it is
+edited out — removing it from current source does not revoke it, so rotate
+it at the provider instead.
 
 Config (model, effort, auto-approve) persists in
 `~/.fullagent/config.json`; sessions save to `~/.fullagent/sessions/`.
