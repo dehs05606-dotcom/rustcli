@@ -34,6 +34,7 @@ from typing import Any, Callable
 from . import config
 from . import systemprompt
 from ._foundation import get_logger, AgentError, clamp
+from .adherence import exit_code_of
 from .autopilot import AutoPilot, RouteDecision
 from .cassette import Cassette
 from .client import (APIError, TurnCancelled, assistant_message,
@@ -253,7 +254,8 @@ class Agent:
         self.brain = Brain(self.log, config.APP_DIR / "brain.json")
         self.compiler = IntentCompiler(
             self.log, default_drafter(self.provider, self.model,
-                                      self.effort),
+                                      self.effort,
+                                      gate=self.mastermind.gate),
             executor=self._compile_wave)
         self.evolution = EvolutionEngine(
             self.log, self._evolution_mutator, self._evolution_evaluator)
@@ -274,11 +276,13 @@ class Agent:
                              executor=self._mesh_exec)
         self.roleforge = RoleForge(
             self.log,
-            role_drafter(self.provider, self.model, self.effort),
+            role_drafter(self.provider, self.model, self.effort,
+                         gate=self.mastermind.gate),
             self._role_audition)
         self.synth = ProgramSynthesizer(
             self.log, default_generator(self.provider, self.model,
-                                        self.effort),
+                                        self.effort,
+                                        gate=self.mastermind.gate),
             registry=self.tools)
         self.ci = CIPilot(self.log, Path.cwd(),
                           runner=self._ci_runner)
@@ -405,6 +409,30 @@ class Agent:
         name = self.cfg.prompt
         sealed = self.mastermind.vault.get(name)
         return sealed if sealed is not None else systemprompt.get(name)
+
+    def _gated(self, prompt_name: str, user_content: str) -> list[dict]:
+        """A one-shot message list for a subsystem call, through the gate.
+
+        The subsystems (council, debate, evolution, synthesis, the role
+        forge, the intent compiler) each make a single tool-less model
+        call. Building the pair by hand at the call site is what put nine
+        model calls outside the Mastermind: unsealed prompts, no lineage,
+        nothing in the ledger. Routing them here makes "every model call
+        passes the gate" true rather than aspirational, and it costs one
+        line at each site."""
+        return systemprompt.one_shot(self.mastermind.gate, prompt_name,
+                                     systemprompt.get(prompt_name),
+                                     user_content)
+
+    def _gated_text(self, text: str, user_content: str) -> list[dict]:
+        """Same, for a prompt whose text is built per call (an evolution
+        candidate's brief). The text is registered so the vault can seal
+        it: re-registering with new text re-seals, so each candidate is
+        fingerprinted in the ledger rather than slipping through
+        unrecorded."""
+        name = "internal:worker-candidate"
+        systemprompt.register(name, text)
+        return self._gated(name, user_content)
 
     def _reseat_system_prompt(self,
                               sections: dict[str, str] | None = None
@@ -634,6 +662,10 @@ class Agent:
                             "tool.result",
                             {"name": name, "status": ev.status,
                              "duration": round(ev.duration, 3),
+                             # read the shell's verdict once, here, so the
+                             # adherence clauses decide on a recorded fact
+                             # instead of grepping a truncated preview
+                             "exit_code": exit_code_of(ev.result),
                              "preview": ev.result[:300]},
                             actor="system", provenance="tool_output",
                             correlation_id=ev.clause_id)
@@ -698,6 +730,15 @@ class Agent:
             self._score_turn(turn)
         except Exception:
             pass  # scorecard is insight, never a crash path
+        try:
+            # Measure the turn against the prompt's own directives. This
+            # runs AFTER the turn is finished and touches nothing: the
+            # model has already answered, and no clause can reach back
+            # into what it saw. Observation, never enforcement.
+            self.mastermind.adherence.score_turn(self._turn_start_seq,
+                                                 prompt=self.cfg.prompt)
+        except Exception:
+            pass  # a measurement must never be able to break a turn
         try:
             self._flush_notifications()
         except Exception:
@@ -2167,10 +2208,7 @@ class Agent:
         """Produce one council position through the model (blocking, no
         tools). The synthesis brief is already blind — it carries only the
         two arguments."""
-        messages = [{"role": "system",
-                     "content": "You are one voice in a structured debate "
-                                "council. Answer exactly as instructed."},
-                    {"role": "user", "content": brief}]
+        messages = self._gated("internal:council-speaker", brief)
         result = chat_blocking(self.provider, self.model, self.effort,
                                messages, None, timeout=120.0)
         return result.content or ""
@@ -2192,16 +2230,12 @@ class Agent:
     def _evolution_mutator(self, role: str, incumbent: str, k: int
                            ) -> list[str]:
         """LLM mutator: k candidate rewrites of a role brief."""
-        messages = [
-            {"role": "system", "content":
-                "You improve agent role briefs. Output ONLY candidate "
-                "briefs separated by lines with exactly --- . No prose "
-                "around them."},
-            {"role": "user", "content":
-                f"Current brief for the '{role}' worker:\n{incumbent}\n\n"
-                f"Write {k} improved variants. Each must be one "
-                f"paragraph, more specific and actionable than the "
-                f"original, keeping the same scope."}]
+        messages = self._gated(
+            "internal:evolution-mutator",
+            f"Current brief for the '{role}' worker:\n{incumbent}\n\n"
+            f"Write {k} improved variants. Each must be one paragraph, "
+            f"more specific and actionable than the original, keeping "
+            f"the same scope.")
         result = chat_blocking(self.provider, self.model, self.effort,
                                messages, None, timeout=120.0)
         parts = [p.strip() for p in
@@ -2215,12 +2249,10 @@ class Agent:
         the reply's structure (STATUS/SUMMARY contract + substance)."""
         from . import systemprompt
         from .team import MAX_WORKERS
-        system = systemprompt.worker_brief(brief, MAX_WORKERS)
         result = chat_blocking(
             self.provider, self.model, self.effort,
-            [{"role": "system", "content": system},
-             {"role": "user",
-              "content": default_benchmark(role)}],
+            self._gated_text(systemprompt.worker_brief(brief, MAX_WORKERS),
+                             default_benchmark(role)),
             None, timeout=180.0)
         content = result.content or ""
         status, summary = parse_worker_final(content)
@@ -2241,10 +2273,7 @@ class Agent:
         provider = PROVIDERS.get(m.provider, self.provider)
         result = chat_blocking(
             provider, m, self.effort,
-            [{"role": "system", "content":
-                "You are a participant in an answer tournament. Follow "
-                "the instructions exactly and concisely."},
-             {"role": "user", "content": prompt}],
+            self._gated("internal:debate-speaker", prompt),
             None, timeout=120.0)
         return result.content or ""
 
@@ -2299,11 +2328,11 @@ class Agent:
         the reply's structure (same yardstick as evolution)."""
         from . import systemprompt
         from .team import MAX_WORKERS
-        system = systemprompt.worker_brief(draft.brief, MAX_WORKERS)
         result = chat_blocking(
             self.provider, self.model, self.effort,
-            [{"role": "system", "content": system},
-             {"role": "user", "content": draft.benchmark}],
+            self._gated_text(
+                systemprompt.worker_brief(draft.brief, MAX_WORKERS),
+                draft.benchmark),
             None, timeout=180.0)
         status, summary = parse_worker_final(result.content or "")
         score = 0.5 if status == "done" else 0.0
@@ -2329,9 +2358,7 @@ class Agent:
         """System 1: one cheap direct model call."""
         result = chat_blocking(
             self.provider, self.model, self.effort,
-            [{"role": "system", "content":
-                "Answer directly and concisely."},
-             {"role": "user", "content": question}],
+            self._gated("internal:dual-fast", question),
             None, timeout=60.0)
         return result.content or ""
 

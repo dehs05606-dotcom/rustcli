@@ -5,7 +5,7 @@ with zero enforcement, zero coercion, zero policing? By making the prompt
 the coherent center of every request. Nothing forces the model — the
 structure simply leaves nothing else to follow.
 
-Three cooperating mechanisms, all deterministic Python (rung 1):
+Four cooperating mechanisms, all deterministic Python (rung 1):
 
   PromptVault          Every prompt is sealed at startup with a sha256
                        fingerprint and recorded in the event log. The
@@ -32,10 +32,21 @@ Three cooperating mechanisms, all deterministic Python (rung 1):
                        everything else in the message points back at it.
                        Coherence, not coercion.
 
+  AdherenceLedger      The closing half (adherence.py). The three above
+                       decide and record what the model is SENT; none of
+                       them can tell you what it DID with it. After each
+                       turn the ledger decides, from the event log alone,
+                       whether the prompt's own directives were honoured
+                       — "never claim success without evidence", "read
+                       before you edit" — and seals the verdicts. That
+                       makes adherence a number, so a prompt can be
+                       engineered against evidence instead of argued
+                       with.
+
 There is no enforcement layer, no injection policing, no output contract
-auditing. The system observes and records (PromptLineage) — it never
-punishes. Every dispatch is sealed into the event log; the lineage IS the
-proof of what the model saw.
+auditing. The system observes and records — it never punishes. Every
+dispatch is sealed into the event log; the lineage IS the proof of what
+the model saw, and the adherence ledger is the proof of what it did.
 """
 
 from __future__ import annotations
@@ -45,6 +56,7 @@ import threading
 from dataclasses import dataclass, field
 
 from . import systemprompt
+from .adherence import AdherenceLedger
 from .kernel import EventLog
 from .team import MAX_WORKERS
 
@@ -336,13 +348,20 @@ class MastermindState:
 
 
 class Mastermind:
-    """Vault + Gate + Composer, assembled over one EventLog."""
+    """Vault + Gate + Composer + Adherence, over one EventLog.
+
+    The first three decide what the model is SENT and record it. The
+    fourth decides, after the fact, what the model DID with it. Together
+    they close the loop the prompt was missing: every request is sealed
+    and auditable going out, and every turn is measured against the
+    prompt's own directives coming back."""
 
     def __init__(self, log: EventLog) -> None:
         self.log = log
         self.vault = PromptVault(log)
         self.composer = CoherenceComposer()
         self.gate = PromptGate(log, self.vault, self.composer)
+        self.adherence = AdherenceLedger(log)
 
     def status(self) -> MastermindState:
         """Live counts from the fold — the observation ledger."""
@@ -377,6 +396,15 @@ class Mastermind:
         lines.append("  the model only ever sees a sealed prompt with "
                      "coherent context composed beneath it — the gate is "
                      "the single door; nothing forces, everything coheres.")
+        ad = self.adherence.status()
+        if ad.score is None:
+            lines.append("  adherence: no turn has exercised a directive "
+                         "yet (/adherence for the clause list)")
+        else:
+            lines.append(f"  adherence: {ad.score * 100:.0f}% of "
+                         f"{ad.applicable} applicable clause checks held "
+                         f"over {ad.turns_scored} turn(s) — /adherence "
+                         f"for the breakdown")
         return "\n".join(lines)
 
 

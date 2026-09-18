@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import systemprompt
 from .kernel import EventLog, fold
 from .team import ROLES
 from ._foundation import get_logger
@@ -85,27 +86,31 @@ class CompiledPlan:
                 "n_items": len(self.items()), "n_waves": len(self.waves)}
 
 
-def _draft_prompt(goal: str) -> list[dict]:
-    return [
-        {"role": "system", "content":
-            "You are the front-end of an agent work compiler. Decompose "
-            "the goal into 4-12 work items. Reply with ONLY a JSON array; "
-            "each element: {\"task\": string, \"role\": one of "
-            + ", ".join(sorted(ROLES)) + ", \"paths\": [files this item "
-            "may write or read], \"depends_on\": [indexes of items that "
-            "must finish first, 0-based]}. No prose, no markdown fence."},
-        {"role": "user", "content": f"GOAL: {goal}"},
-    ]
+def _draft_prompt(goal: str, gate=None) -> list[dict]:
+    """The compiler's one-shot pair, gated when a gate is available.
+
+    The prompt text is a template in systemprompt.py; only the live role
+    vocabulary is filled in here. With a gate the call is sealed and
+    lands in the lineage like every other; without one (a standalone
+    module self-test) the same text is seated directly."""
+    system = systemprompt.intent_compiler(ROLES)
+    if gate is not None:
+        # built per call from the live role set, so register it: the
+        # vault re-seals whenever the text changes and never serves stale
+        systemprompt.register("internal:intent-compiler", system)
+    return systemprompt.one_shot(gate, "internal:intent-compiler",
+                                 system, f"GOAL: {goal}")
 
 
-def default_drafter(provider, model, effort
+def default_drafter(provider, model, effort, gate=None
                     ) -> Callable[[str], list[dict]]:
     """Production drafter: one blocking model call -> raw IR items."""
     from .client import chat_blocking
 
     def draft(goal: str) -> list[dict]:
         result = chat_blocking(provider, model, effort,
-                               _draft_prompt(goal), None, timeout=120.0)
+                               _draft_prompt(goal, gate), None,
+                               timeout=120.0)
         text = (result.content or "").strip()
         if text.startswith("```"):
             text = re.sub(r"^```[a-z]*\n?|\n?```$", "", text).strip()

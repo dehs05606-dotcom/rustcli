@@ -377,6 +377,8 @@ Event-log commands:
 - `/auto [on|off|status]` — the AutoPilot self-routing brain (on by default)
 - `/prompt [main|master|list]` — choose the system prompt: `main` (compact)
   or `master` (the extended 130k+ specification prompt)
+- `/adherence` — per-clause adherence scores, recent misses, and the
+  directive most worth rewriting
 - `/mastermind` — the prompt-coherence ledger (sealed prompts, gate,
   composed context, lineage)
 - `/dashboard` — live observability: cost, goal, crew, router, spec,
@@ -450,6 +452,7 @@ fullagent/
   config.py        providers, models, effort levels, paths
   systemprompt.py  the ONE home of every system prompt (single source)
   mastermind.py    prompt coherence: sealed vault, gate, composer, lineage
+  adherence.py     did the model follow it — clauses decided from the log
   tools.py         16 tools: files, shell, search, real-time web
   client.py        streaming OpenAI-compatible client (SSE, retries, cancel)
   agent.py         agent loop: LLM <-> tools, event-sourced on the kernel
@@ -530,18 +533,40 @@ ceiling and the remaining context window before sending them to Kilo.
 
 `fullagent/mastermind.py` makes following `systemprompt.py` *inevitable* —
 not by telling the model "you must obey", but by making the sealed prompt
-the only coherent center of every request. Three cooperating mechanisms,
+the only coherent center of every request. Four cooperating mechanisms,
 all deterministic Python:
 
 | Mechanism | What it does |
 |---|---|
 | **PromptVault** | Every prompt is sealed with a sha256 fingerprint and recorded in the event log. The vault is the only source a model ever reads a prompt from; prompts registered at runtime are sealed on demand, and a changed prompt is re-sealed — no stale copy is ever served. |
-| **PromptGate** | The single door to the model. Every request (main agent, scout, worker) passes `gate.dispatch()`, which guarantees `messages[0]` carries the sealed prompt byte-for-byte at the front, re-seats it if anything shadowed or corrupted it (an integrity restore — recorded, never punished), and seals a `prompt.dispatch` lineage event. There is no other way to reach the API. |
-| **CoherenceComposer** | Live context (constitution, goal, web mode, memory) is never appended as raw text that could compete with the prompt. It is composed beneath the sealed prompt as one coherent document: each section is framed as *input to* the prompt, provenance-tagged, ordered by authority, deduplicated. The prompt stays the only voice giving direction. |
+| **PromptGate** | The single door to the model. Every request (main agent, scout, worker, and each subsystem's one-shot call) passes `gate.dispatch()`, which guarantees `messages[0]` carries the sealed prompt byte-for-byte at the front, re-seats it if anything shadowed or corrupted it (an integrity restore — recorded, never punished), and seals a `prompt.dispatch` lineage event. There is no other way to reach the API. |
+| **CoherenceComposer** | Live context (constitution, goal, web mode, memory) is never appended as raw text that could compete with the prompt. It is composed beneath the sealed prompt as one coherent document: each section is framed as *input to* the prompt, provenance-tagged, ordered by authority, deduplicated. The prompt stays the only voice giving direction. Nothing is ever placed in front of the prompt, and no reminder trails it. |
+| **AdherenceLedger** | `fullagent/adherence.py`. The three above record what the model was *sent*; this one records what it *did*. After every turn each clause — one directive from `systemprompt.py`, turned into a predicate over the turn's own events — is decided from the event log and sealed as a `prompt.adherence` event. |
 
-There is no enforcement layer — the system observes and records
-(PromptLineage), it never punishes. Every dispatch is sealed into the
-event log; inspect the live ledger with `/mastermind`.
+There is no enforcement layer — the system observes and records, it never
+punishes. Every dispatch is sealed into the event log; inspect the live
+ledger with `/mastermind`.
+
+### Adherence — measuring whether the prompt is actually followed
+
+A compliance reminder asserts that the directives matter and can never
+tell you whether the assertion worked. A clause can. Each one is decided
+from recorded facts — no second model call, no LLM judge — and reports
+*not applicable*, *held*, or *violated* with its evidence:
+
+| Clause | The directive it decides |
+|---|---|
+| `verify-before-success` | "Verify everything. Never claim success without evidence." — a success claim after an edit, with no passing check *after the last edit*, is a violation. |
+| `read-before-edit` | "Understand first. Read the codebase before making changes." — an `edit_file` on a path never read, in this turn or any earlier one. |
+| `cited-paths-exist` | "Never fabricate. Cite real sources, real file paths." — a `path:line` citation naming a file that does not exist. |
+| `goal-proof-discipline` | "A clause is only proven when its predicate actually passes." — a `PROVEN: C1` the kernel never sealed. |
+| `failures-surfaced` | "Be honest about uncertainty." — tools failed and the reply claims success without mentioning it. |
+
+Precision over coverage is deliberate: a hedge ("this *should* make the
+tests pass") is not a claim, and a directive that cannot be decided from
+recorded facts is left out rather than guessed at. Run `/adherence` for
+the per-clause breakdown, the recent misses, and the directive most worth
+rewriting. Nothing in it changes what the model sees.
 
 ## v3 — eight advanced subsystems
 

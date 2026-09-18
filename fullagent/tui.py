@@ -286,6 +286,7 @@ SLASH_COMMANDS = [
     ("/auto", "autopilot self-routing — /auto [on|off|status]"),
     ("/prompt", "system prompt — /prompt [main|master|list]"),
     ("/mastermind", "prompt coherence ledger — sealed prompts, gate, lineage"),
+    ("/adherence", "did the model follow the prompt — clause scores + misses"),
     ("/dashboard", "live observability — cost, goal, agents, router, spec"),
     ("/router", "smart model routing — decisions + savings"),
     ("/spec", "speculative execution — prefetch stats + hit-rate"),
@@ -1319,6 +1320,9 @@ class UI:
             self._cmd_prompt(arg)
         elif cmd == "/mastermind":
             self.print_info(self.agent.mastermind.format_status(), C["pink"])
+        elif cmd == "/adherence":
+            self.print_info(
+                self.agent.mastermind.adherence.format_status(), C["pink"])
         elif cmd == "/dashboard":
             self.print_info(self.agent.dashboard.render(), C["cyan"])
         elif cmd == "/router":

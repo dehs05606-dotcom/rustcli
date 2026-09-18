@@ -29,6 +29,7 @@ import textwrap
 import threading
 from dataclasses import dataclass, field
 
+from . import systemprompt
 from .kernel import EventLog
 from ._foundation import get_logger
 
@@ -61,7 +62,7 @@ class SynthResult:
     total: int = 0
 
 
-def default_generator(provider, model, effort):
+def default_generator(provider, model, effort, gate=None):
     """Production generator: spec -> function source."""
     from .client import chat_blocking
 
@@ -70,14 +71,11 @@ def default_generator(provider, model, effort):
             f"  {e['args']} == {e['want']!r}" for e in spec.examples)
         result = chat_blocking(
             provider, model, effort,
-            [{"role": "system", "content":
-                "You write small pure Python tools. Reply with ONLY the "
-                "function source — no imports, no prose, no markdown "
-                "fence. The function must be deterministic and pure."},
-             {"role": "user", "content":
-                f"Function name: {spec.name}\nPurpose: "
-                f"{spec.description}\nIt must satisfy:\n{ex}\n"
-                f"def {spec.name}(...):"}],
+            systemprompt.one_shot(gate, "internal:program-synth",
+                      systemprompt.PROGRAM_SYNTH,
+                      f"Function name: {spec.name}\nPurpose: "
+                      f"{spec.description}\nIt must satisfy:\n{ex}\n"
+                      f"def {spec.name}(...):"),
             None, timeout=120.0)
         text = (result.content or "").strip()
         if text.startswith("```"):

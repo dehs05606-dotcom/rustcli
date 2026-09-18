@@ -175,6 +175,8 @@ class State:
     # Mastermind — prompt coherence ledger
     prompt_sealed: list[dict] = field(default_factory=list)
     prompt_dispatches: list[dict] = field(default_factory=list)
+    # Mastermind — what the model did with the prompt it was sent
+    prompt_adherence: list[dict] = field(default_factory=list)
     # v3 advanced subsystems
     router_decisions: list[dict] = field(default_factory=list)
     semantic_index: list[dict] = field(default_factory=list)
@@ -620,6 +622,8 @@ def _fold_apply(st: State, ev: Event) -> None:
         st.prompt_sealed.append(d)
     elif t == "prompt.dispatch":
         st.prompt_dispatches.append(d)
+    elif t == "prompt.adherence":
+        st.prompt_adherence.append(d)
     elif t == "router.decision":
         st.router_decisions.append(d)
     elif t == "semantic.indexed":

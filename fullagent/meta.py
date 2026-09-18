@@ -53,7 +53,7 @@ class RoleDraft:
                 "writes": self.writes}
 
 
-def default_drafter(provider, model, effort):
+def default_drafter(provider, model, effort, gate=None):
     """Production drafter: one blocking model call -> a role draft."""
     from .client import chat_blocking
     import json
@@ -61,16 +61,10 @@ def default_drafter(provider, model, effort):
     def draft(mission: str) -> dict:
         result = chat_blocking(
             provider, model, effort,
-            [{"role": "system", "content":
-                "You design agent specialists. Reply ONLY with a JSON "
-                "object: {\"name\": snake_case_id, \"brief\": one strong "
-                "paragraph (>=100 words) telling this specialist exactly "
-                "how to work, \"tools\": subset of the allowed list, "
-                "\"benchmark\": one task proving the role works}. No "
-                "prose around the JSON."},
-             {"role": "user",
-              "content": f"MISSION: {mission}\nALLOWED TOOLS: "
-                         + ", ".join(sorted(_all_tool_names()))}],
+            systemprompt.one_shot(gate, "internal:role-drafter",
+                      systemprompt.ROLE_DRAFTER,
+                      f"MISSION: {mission}\nALLOWED TOOLS: "
+                      + ", ".join(sorted(_all_tool_names()))),
             None, timeout=120.0)
         text = (result.content or "").strip()
         if text.startswith("```"):

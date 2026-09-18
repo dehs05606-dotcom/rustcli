@@ -169,6 +169,25 @@ def worker(role: str, max_workers: int) -> str:
     return worker_brief(brief, max_workers)
 
 
+def one_shot(gate, prompt_name: str, fallback: str,
+             user_content: str) -> list[dict]:
+    """The message pair for a subsystem's single, tool-less model call.
+
+    With a gate (the Mastermind's, handed in by the Agent) the prompt is
+    sealed and the call lands in the lineage like every other. Without one
+    — a module self-test running standalone — the same text is seated
+    directly. Either way the words come from this file and nowhere else,
+    which is what keeps the guarantee at the top of it true.
+
+    `gate` is duck-typed on purpose: mastermind.py imports this module, so
+    naming its type here would close the loop into a circular import."""
+    messages = [{"role": "user", "content": user_content}]
+    if gate is not None:
+        messages, _ = gate.dispatch(prompt_name, messages)
+        return messages
+    return with_system(messages, fallback)
+
+
 def with_system(messages: list[dict], system: str) -> list[dict]:
     """Guarantee the system prompt is present and first.
 
@@ -244,16 +263,77 @@ def spec_present() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# INTERNAL — the one-shot prompts the subsystems speak with
+# ---------------------------------------------------------------------------
+# These drive single, tool-less model calls inside a subsystem: one turn
+# of a debate, one role draft, one synthesis. They were written inline at
+# their call sites, which made this file's "no inline prompt strings
+# exist" claim untrue and — worse — kept nine model calls outside the
+# Mastermind entirely: unsealed, ungated, invisible in the ledger. They
+# are prompts. They live here, and they go through the same gate.
+
+COUNCIL_SPEAKER = ("You are one voice in a structured debate council. "
+                   "Answer exactly as instructed.")
+
+DEBATE_SPEAKER = ("You are a participant in an answer tournament. Follow "
+                  "the instructions exactly and concisely.")
+
+DUAL_FAST = "Answer directly and concisely."
+
+EVOLUTION_MUTATOR = ("You improve agent role briefs. Output ONLY candidate "
+                     "briefs separated by lines with exactly --- . No prose "
+                     "around them.")
+
+ROLE_DRAFTER = ("You design agent specialists. Reply ONLY with a JSON "
+                "object: {\"name\": snake_case_id, \"brief\": one strong "
+                "paragraph (>=100 words) telling this specialist exactly "
+                "how to work, \"tools\": subset of the allowed list, "
+                "\"benchmark\": one task proving the role works}. No "
+                "prose around the JSON.")
+
+PROGRAM_SYNTH = ("You write small pure Python tools. Reply with ONLY the "
+                 "function source — no imports, no prose, no markdown "
+                 "fence. The function must be deterministic and pure.")
+
+INTENT_COMPILER = (
+    "You are the front-end of an agent work compiler. Decompose the goal "
+    "into 4-12 work items. Reply with ONLY a JSON array; each element: "
+    "{{\"task\": string, \"role\": one of {roles}, \"paths\": [files this "
+    "item may write or read], \"depends_on\": [indexes of items that must "
+    "finish first, 0-based]}}. No prose, no markdown fence.")
+
+
+def intent_compiler(roles: list[str] | set[str]) -> str:
+    """The intent compiler's prompt, with the live role vocabulary in it.
+
+    The roles are a runtime set, so this one is built rather than
+    constant — but it is still built here, from a template defined here,
+    and it still resolves through the registry."""
+    return INTENT_COMPILER.format(roles=", ".join(sorted(roles)))
+
+
+# ---------------------------------------------------------------------------
 # Prompt registry — add more system prompts here later
 # ---------------------------------------------------------------------------
 # Every selectable system prompt lives in this one map. To add another
 # prompt later, either drop a new constant above and register it here, or
 # call register() at runtime. get() resolves a name to its prompt, falling
 # back to MAIN so an unknown name can never leave the model promptless.
+#
+# The internal:* names are the subsystems' one-shot prompts. They are in
+# the registry so the vault can seal them and the gate can dispatch them
+# — a prompt outside the registry cannot be sealed, and a prompt that was
+# never sealed must never reach a model.
 
 PROMPTS: dict[str, str] = {
     "main": MAIN,
     "master": MASTER,
+    "internal:council-speaker": COUNCIL_SPEAKER,
+    "internal:debate-speaker": DEBATE_SPEAKER,
+    "internal:dual-fast": DUAL_FAST,
+    "internal:evolution-mutator": EVOLUTION_MUTATOR,
+    "internal:role-drafter": ROLE_DRAFTER,
+    "internal:program-synth": PROGRAM_SYNTH,
 }
 
 
@@ -306,6 +386,46 @@ if __name__ == "__main__":
     register("custom", "hello prompt")
     assert get("custom") == "hello prompt"
     assert "master" in names() and "main" in names()
+    # every internal:* prompt resolves, and none is empty
+    for _name, _text in PROMPTS.items():
+        assert _text and get(_name) == _text, _name
+    # the compiler's template fills its role slot and leaves the literal
+    # JSON braces alone
+    _ic = intent_compiler({"tester", "coder"})
+    assert "one of coder, tester" in _ic
+    assert '{"task": string' in _ic and "{roles}" not in _ic
+
+    # ------------------------------------------------------------------
+    # The guarantee this file opens by making, checked instead of claimed:
+    # no module writes a system prompt inline. Every prompt the model ever
+    # reads is defined here, which is also what lets the Mastermind seal
+    # and gate all of them — an inline literal is a model call nobody
+    # recorded.
+    # ------------------------------------------------------------------
+    import ast as _ast
+    from pathlib import Path as _Path
+
+    # mastermind.py's own self-test builds shadowing system messages on
+    # purpose, to prove the gate replaces them. That is the one legitimate
+    # inline literal in the package.
+    _EXEMPT = {"systemprompt.py", "mastermind.py"}
+    _offenders: list[str] = []
+    for _f in sorted(_Path(__file__).parent.glob("*.py")):
+        if _f.name in _EXEMPT:
+            continue
+        for _node in _ast.walk(_ast.parse(_f.read_text(encoding="utf-8"))):
+            if not isinstance(_node, _ast.Dict):
+                continue
+            for _k, _v in zip(_node.keys, _node.values):
+                if (isinstance(_k, _ast.Constant) and _k.value == "role"
+                        and isinstance(_v, _ast.Constant)
+                        and _v.value == "system"):
+                    _offenders.append(f"{_f.name}:{_node.lineno}")
+    assert not _offenders, (
+        "inline system prompt(s) outside systemprompt.py — every prompt "
+        "belongs here so it can be sealed and gated: " + ", ".join(_offenders))
+
     note = "with spec" if spec_present() else "no project.txt — MASTER = MAIN"
     print(f"SYSTEMPROMPT SELF-TEST PASS  "
-          f"(MASTER = {len(MASTER):,} chars, {note})")
+          f"(MASTER = {len(MASTER):,} chars, {note}; "
+          f"{len(PROMPTS)} registered, 0 inline)")
