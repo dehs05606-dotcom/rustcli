@@ -175,8 +175,33 @@ def stem(word: str) -> str:
             return word[:-3] + "y"
         for suffix in ("ing", "ed"):
             if word.endswith(suffix):
-                return word[:-len(suffix)]
+                base = word[:-len(suffix)]
+                # A suffix is only a suffix if a word is left when you
+                # take it off: "thing" is not "th" + ing, and a stemmer
+                # that thinks it is will happily conflate "thing" with
+                # "think", "third" and "this".
+                if len(base) < 3:
+                    return word
+                # "running" -> "runn" -> "run", so it meets "run". The
+                # l/s/z exception is Porter's and it earns its keep:
+                # without it "falling" -> "fal" would stop meeting "fall".
+                if base[-1] == base[-2] and base[-1] not in "lsz":
+                    base = base[:-1]
+                return base
     if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        # English adds "es" after a sibilant, so "pushes" is "push" + es
+        # while "times" is "time" + s. Getting this wrong leaves "push"
+        # and "pushes" as different words, which is exactly the pair an
+        # audit needs to see through.
+        if (word.endswith("es") and len(word) > 4
+                and word[:-2].endswith(("s", "x", "z", "ch", "sh"))):
+            word = word[:-2]
+        else:
+            word = word[:-1]
+    # Finally, a trailing "e". Applied to every word, this unifies the
+    # forms that differ only by it — "include"/"including" both land on
+    # "includ", "rule"/"rules" both on "rul" — which is the whole job.
+    if len(word) > 3 and word.endswith("e"):
         return word[:-1]
     return word
 
@@ -347,6 +372,22 @@ Never write a credential into a file that is tracked by git.
         # different words would have missed the one rule that applies
         assert stem("claiming") == stem("claims") == "claim"
         assert stem("editing") == stem("edited") == "edit"
+        # a doubled consonant is undoubled, so "running" meets "run" —
+        # except after l/s/z, where "falling" must stay "fall"
+        assert stem("running") == stem("runs") == "run"
+        assert stem("stopping") == "stop"
+        assert stem("falling") == stem("falls") == "fall"
+        # and a suffix is only stripped when a word is left behind
+        assert stem("thing") == "thing"
+        assert stem("being") == "being"
+        # "pushes" is "push" + es, "times" is "time" + s — an audit that
+        # cannot see through that pair cannot see a restated rule either
+        assert stem("pushes") == stem("push") == "push"
+        assert stem("boxes") == stem("box") == "box"
+        assert stem("times") == stem("time") == "tim"
+        # and the forms that differ only by a trailing "e" land together
+        assert stem("include") == stem("including") == "includ"
+        assert stem("rule") == stem("rules") == "rul"
         # but only that far — these are different directives, not forms
         assert stem("verification") != stem("verify")
 

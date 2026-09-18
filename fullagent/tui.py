@@ -68,7 +68,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
-from . import config
+from . import config, promptaudit
 from .agent import Agent, ToolEvent
 from .config import (
     APP_NAME,
@@ -3166,6 +3166,10 @@ class UI:
         if not violations:
             return
         ledger = self.agent.mastermind.adherence
+        try:
+            index = self.agent.mastermind.index(self.agent.cfg.prompt)
+        except Exception:                          # noqa: BLE001
+            index = None
         for v in violations[:3]:
             directive = ledger.directive_of(v.get("clause", ""))
             self.console.print(Text(f"  ⚑ {directive}", style=C["yellow"]))
@@ -3173,6 +3177,15 @@ class UI:
             if evidence:
                 self.console.print(Text(f"    {evidence[:160]}",
                                         style=C["dim"]))
+            # Name the section of THEIR prompt this maps onto. A clause id
+            # is the repo's vocabulary; the section is the user's own, and
+            # it is the thing they would actually go and edit.
+            if index is not None:
+                hits = index.lookup(directive, k=1)
+                if hits:
+                    self.console.print(
+                        Text(f"    your prompt: {hits[0].section.label}",
+                             style=C["dim"]))
         if len(violations) > 3:
             self.console.print(
                 Text(f"  ⚑ +{len(violations) - 3} more (/adherence)",
@@ -3483,6 +3496,41 @@ class UI:
         hints.append("Ctrl+E", style=f"bold {C['cyan']}")
         hints.append(" effort", style=C["dim"])
         self.console.print(hints)
+        self.console.print()
+        self._print_prompt_health()
+
+    def _print_prompt_health(self) -> None:
+        """Say once, at startup, what is wrong with the prompt in use.
+
+        Only for a prompt the user wrote: the built-ins are this repo's
+        problem, not theirs. A long prompt accretes restated rules and
+        opposed pairs that cost adherence directly and that nobody can
+        see by reading, so the one moment worth spending on it is before
+        the session starts — and it costs no command, because a report
+        you have to ask for is a report you never see."""
+        name = self.agent.cfg.prompt
+        if name not in getattr(self.agent, "user_prompts", {}):
+            return
+        try:
+            index = self.agent.mastermind.index(name)
+            report = promptaudit.audit(index)
+        except Exception:                          # noqa: BLE001
+            return
+        stats = index.stats()
+        head = (f" ❯ prompt  {name}  ·  {stats['chars']:,} chars in "
+                f"{stats['sections']} section(s), "
+                f"addressable with spec_lookup")
+        self.console.print(Text(head, style=C["dim"]))
+        self.agent.log.append("prompt.audited",
+                              {"name": name, "chars": report.chars,
+                               "sections": report.sections,
+                               "findings": len(report.findings),
+                               "contested": report.contested},
+                              actor="kernel")
+        if report.clean:
+            return
+        self.console.print(Text("   " + report.format(limit=4),
+                                style=C["yellow"]))
         self.console.print()
 
     def _emit_user(self, text: str) -> None:

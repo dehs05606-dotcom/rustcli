@@ -455,6 +455,7 @@ fullagent/
   systemprompt.py  the ONE home of every system prompt (single source)
   mastermind.py    prompt coherence: sealed vault, gate, composer, lineage
   spec.py          the prompt, cut into addressable sections + BM25 lookup
+  promptaudit.py   is the prompt any good as a document — read at 49k
   adherence.py     did the model follow it — clauses decided from the log
   promptlab.py     A/B two prompts on a scenario set, clause by clause
   tools.py         16 tools: files, shell, search, real-time web
@@ -710,6 +711,82 @@ tuned to leave ordinary reporting alone — *"I can't read the file because
 it does not exist"* is not a decline. Nothing is done with the count
 except show it to you: it is never fed back to the model, and there is
 nothing here that tries to talk a model out of its own safety behaviour.
+
+### Auditing the prompt itself
+
+Everything above treats the prompt as given and asks what happened to it.
+`fullagent/promptaudit.py` asks the question nobody asks, because at 4,000
+characters it does not need asking and at 49,000 it is the whole problem:
+**is this prompt any good as a document?**
+
+A prompt that size is never written in one sitting. It accretes. A rule
+gets added in March and added again in July with different wording. A
+section written to fix one failure quietly contradicts a section written
+to fix another. One section grows to a fifth of the whole. None of that
+is visible to the author, who reads the prompt as intent rather than as
+text — and all of it costs adherence directly, because a contradiction is
+a coin flip and a redundancy is a dilution.
+
+| Finding | What it means |
+|---|---|
+| `contradictory` | Two sections about the same thing with opposite polarity — one prohibits where the other requires, and the model has to pick. |
+| `redundant` | A family of sections stating one rule. Reported as the **family**, not as every pair inside it: six sections saying the same thing make fifteen pairs, and fifteen lines naming two of the six is not a report anyone can act on. |
+| `oversized` | One section large enough to dominate the document — too coarse to retrieve or to cite precisely. |
+| `unreachable` | A section whose *rarest* word still appears all over the prompt. It has nothing of its own to be found by, so no question can rank it above the sections it borrows from. This is the section an author swears is in the prompt and the model never seems to apply. |
+
+Similarity is measured over each section's **distinctive** terms, not its
+raw vocabulary, and this is load-bearing at scale: measured on raw terms,
+two unrelated subsystem sections in a 49k prompt score 0.94 and the report
+fills with pairs that have nothing to do with each other; measured on
+distinctive terms the same pair scores 0.33 while the genuinely restated
+rule still scores 0.77.
+
+The audit runs at startup for a prompt you wrote — no command — and it
+never rewrites anything. The findings are candidates for you to read.
+
+**What it does not do**, stated plainly because a tool that hides its
+blind spot is worse than one that has none: detection is lexical, so it
+finds two sections that argue using the same words. A rule written in
+March and flatly reversed in July by an author reaching for entirely
+different vocabulary will not be caught. A clean report means *"these
+specific pairs are fine"*, never *"this prompt does not contradict
+itself"*.
+
+### Measured at 49k, not at 4k
+
+The repo's own prompt is 4.2k, and a number measured there is the wrong
+number for someone running a prompt ten times the size. `tests/fixture49k.py`
+builds a 49,000-character prompt with the flaws real ones have — a rule
+restated in different words, a pair that ended up opposing each other, a
+section that grew past the rest, and a block of pure boilerplate — and
+`tests/test_49k_prompt.py` runs the whole path against it: seal, dispatch,
+place, index, look up, audit. Run it directly for the table:
+
+```
+MEASURED ON A 49k PROMPT (tests/fixture49k.py)
+  prompt                    49,191 chars    15,566 tokens
+  addressable sections         153
+  audit findings                10  (31,627 chars contested)
+
+  tokens between the live context and the model's next token:
+     depth     composed (system)     slot (tail)
+         5                 1,460               0
+        50                14,600               0
+       200                58,400               0
+
+  spec_lookup                 0.11 ms per call
+
+  contradictory  Destructive operations  +  Shell operations
+                 88% shared vocabulary, opposite polarity — one prohibits
+                 where the other requires, and the model has to pick
+  redundant      Reading before changing  +  Opening files first
+                 80% shared vocabulary, same polarity
+  unreachable    Changes
+                 its rarest word still appears in 25 of 153 sections
+```
+
+The tests assert the planted flaws are the ones found, and that the
+sections that are fine are left alone.
 
 ### Promptlab — testing a prompt change like a code change
 
