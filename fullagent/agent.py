@@ -34,7 +34,15 @@ from typing import Any, Callable
 from . import config
 from . import systemprompt
 from ._foundation import get_logger, AgentError, clamp
+from . import guardrail as guardrail_mod
 from .adherence import exit_code_of
+from .audit import AuditTrail
+from .benchmark import run as run_benchmark
+from .compliance import ComplianceEngine
+from .constitution import ConstitutionalCore
+from .guardrail import ActionFacts, Guardrail, ResponseFacts
+from .toolpolicy import ASK as POLICY_ASK
+from .toolpolicy import ToolPolicy, from_config as tool_policy_from_config
 from .autopilot import AutoPilot, RouteDecision
 from .cassette import Cassette
 from .client import (APIError, TurnCancelled, assistant_message,
@@ -154,6 +162,9 @@ class Turn:
     # a measurement you have to run a command to see is a measurement
     # nobody runs.
     adherence: dict = field(default_factory=dict)
+    # this turn's guardrail verdict (guardrail.PipelineResult.to_dict()),
+    # decided BEFORE the reply was accepted rather than after it was sent
+    verification: dict | None = None
     timestamp: str = field(
         default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
 
@@ -372,6 +383,12 @@ class Agent:
         self.health = {"model_errors": {}, "failovers": 0}
         self._failed_over = False            # at most one failover per turn
         self._turn_start_seq = 0
+        self._turn_reads: set[str] = set()      # paths read in THIS turn
+        self._turn_tool_names: list[str] = []   # tools called in THIS turn
+        self._turn_approvals: set[str] = set()  # tools the user approved
+        # (index, text) of the transient correction messages this turn
+        self._correction_slots: list[tuple[int, str]] = []
+        self._init_compliance_stack()
         self._compact_digests: list[str] = []  # knowledge kept on compaction
         self._error_counts: dict[str, int] = {}
         self._file_hashes: dict[str, list[str]] = {}  # oscillation history
@@ -409,6 +426,131 @@ class Agent:
         prewarm_connection(self.provider)
 
     # -- model / effort ----------------------------------------------------
+
+    # -- compliance stack --------------------------------------------------
+
+    def _init_compliance_stack(self) -> None:
+        """Compile the active prompt into enforceable policy, and stand up
+        the layers that decide against it.
+
+        Everything here is defaulted ON and needs no command: a rule the
+        user has to switch on is a rule that is off. Every step is
+        individually guarded, because a session that cannot start is worse
+        than one that starts without a guardrail and says so — a failure
+        leaves `self.guardrail` None, and every call site reads None as
+        "not enforcing" rather than pretending to enforce.
+        """
+        self.constitution_core = None
+        self.constitution = None
+        self.guardrail = None
+        self.compliance = None
+        self.tool_policy = None
+        self.audit = None
+        extra = getattr(self.cfg, "extra", {}) or {}
+        try:
+            self.tool_policy = tool_policy_from_config(
+                extra.get("tool_policy") or {}, log=self.log)
+        except Exception:
+            try:
+                self.tool_policy = ToolPolicy(log=self.log)
+            except Exception:
+                self.tool_policy = None
+        try:
+            self.constitution_core = ConstitutionalCore(self.log)
+            self.constitution = self.constitution_core.ratify_prompt(
+                self.cfg.prompt, self._base_prompt(),
+                tool_names=frozenset(self.tools))
+            level = guardrail_mod.VERIFY
+            self.compliance = ComplianceEngine(
+                self.log, floor=guardrail_mod.ADVISE, start=level)
+            self.guardrail = Guardrail(self.constitution, log=self.log,
+                                       level=level, max_attempts=2)
+            self.audit = AuditTrail(self.log, constitution=self.constitution,
+                                    signing_key=self.constitution_core.key)
+        except Exception:
+            self.guardrail = None      # measured, never fatal
+
+    def _sync_enforcement(self) -> None:
+        """Let the compliance engine set the guardrail's strength."""
+        if self.guardrail is None or self.compliance is None:
+            return
+        try:
+            self.guardrail.level = self.compliance.level_for(
+                self.model.id, self.cfg.prompt)
+        except Exception:
+            pass
+
+    def _action_facts(self, tool_name: str, args: dict) -> ActionFacts:
+        return ActionFacts(
+            tool_name=tool_name, args=args or {},
+            reads=frozenset(self._turn_reads),
+            approvals=frozenset(self._turn_approvals),
+            autonomy=self.autonomy,
+            prior_tools=tuple(self._turn_tool_names),
+            root=Path.cwd())
+
+    def _verify_reply(self, text: str, user_text: str):
+        """Run the three-stage pipeline over a candidate reply."""
+        if self.guardrail is None:
+            return None
+        try:
+            verdicts = [e for e in self.log.events()
+                        if e.type == "judge.verdict"
+                        and e.seq > self._turn_start_seq]
+            facts = ResponseFacts(
+                text=text, user_text=user_text,
+                tools_called=tuple(self._turn_tool_names),
+                reads=frozenset(self._turn_reads),
+                verdicts_passed=sum(1 for v in verdicts
+                                    if v.data.get("passed")),
+                verdicts_failed=sum(1 for v in verdicts
+                                    if not v.data.get("passed")),
+                root=Path.cwd())
+            return self.guardrail.verify_response(facts)
+        except Exception:
+            return None
+
+    def _drop_corrections(self) -> None:
+        """Remove the transient correction messages from history.
+
+        A correction exists for exactly one regeneration. Left in place it
+        would ride in every later request, cost tokens forever, and become
+        the per-turn compliance banner this codebase already removed once.
+        """
+        for index, text in sorted(self._correction_slots, reverse=True):
+            if 0 <= index < len(self.messages):
+                held = self.messages[index]
+                # Match on the exact text, not just the position: a
+                # compaction or an emergency trim can move messages under
+                # us mid-turn, and popping by a stale index would delete
+                # someone's actual message.
+                if held.get("role") == "user" and \
+                        held.get("content") == text:
+                    self.messages.pop(index)
+        self._correction_slots = []
+
+    def compliance_status(self) -> str:
+        """The live compliance picture — constitution, guardrail, models."""
+        parts = []
+        if self.constitution_core is not None:
+            parts.append(self.constitution_core.format_status())
+        if self.guardrail is not None:
+            parts.append(self.guardrail.format_status())
+        if self.tool_policy is not None:
+            parts.append(self.tool_policy.format_status())
+        if self.compliance is not None:
+            parts.append(self.compliance.format_status())
+        if self.audit is not None:
+            parts.append(self.audit.dashboard().format())
+        return "\n\n".join(parts) or "compliance stack unavailable"
+
+    def benchmark_model(self, generate, model_id: str | None = None):
+        """Score a model against the shipped adherence suite."""
+        if self.guardrail is None:
+            return None
+        return run_benchmark(model_id or self.model.id, self.guardrail,
+                             generate, prompt=self.cfg.prompt,
+                             root=Path.cwd(), log=self.log)
 
     @property
     def model(self) -> Model:
@@ -584,6 +726,12 @@ class Agent:
         started = time.time()
         self._turn_start_seq = self.log.head()
         self._failed_over = False
+        self._turn_reads = set()
+        self._turn_tool_names = []
+        self._turn_approvals = set()
+        self._correction_slots = []
+        # the guardrail runs at whatever strength this model has earned
+        self._sync_enforcement()
 
         # AUTOPILOT: the agent decides for itself which powers this turn
         # needs — goal mode, real-time web — and enables
@@ -708,6 +856,33 @@ class Agent:
                             raise TurnCancelled()
                     continue
 
+                # GUARDRAIL — the reply is decided against the ratified
+                # constitution BEFORE it is accepted. A blocking failure
+                # sends the turn back through the model with the violated
+                # rule quoted at it. The correction rides as one transient
+                # message that `_drop_corrections` removes at the end of
+                # the turn, so nothing accumulates in history.
+                verdict = self._verify_reply(result.content, user_text)
+                turn.verification = verdict.to_dict() if verdict else None
+                if (verdict is not None
+                        and verdict.needs_regeneration
+                        and len(self._correction_slots)
+                        < self.guardrail.max_attempts - 1
+                        and not guardrail_mod.is_refusal(result.content)):
+                    correction_text = self.guardrail.correction(verdict)
+                    self.messages.append(
+                        {"role": "user", "content": correction_text})
+                    self._correction_slots.append(
+                        (len(self.messages) - 1, correction_text))
+                    self.log.append(
+                        "guardrail.regenerate",
+                        {"attempt": len(self._correction_slots),
+                         "violations": [v.to_dict()
+                                        for v in verdict.blocking]},
+                        actor="kernel")
+                    on_status("correcting")
+                    continue
+
                 # plain assistant reply — done
                 turn.assistant_text += result.content
                 turn.usage = result.usage
@@ -751,6 +926,10 @@ class Agent:
 
         self._turn_status = None
         self._turn_output = None
+        try:
+            self._drop_corrections()
+        except Exception:
+            pass   # history hygiene must never break a finished turn
         turn.duration = time.time() - started
         turn.iterations = iterations
         try:
@@ -768,6 +947,24 @@ class Agent:
                 depth=iterations).to_dict()
         except Exception:
             pass  # a measurement must never be able to break a turn
+        try:
+            # Fold this turn's verdict into the model's compliance
+            # picture. This is what moves the guardrail's strength: a
+            # model that keeps failing is checked harder next turn, and
+            # one that keeps passing is eventually checked less.
+            if self.compliance is not None and turn.verification is not None:
+                self.compliance.observe(
+                    self.model.id,
+                    1.0 - min(1.0, 0.25 * turn.verification.get("blocking", 0)
+                              + 0.06 * max(0, turn.verification.get(
+                                  "violations", 0)
+                                  - turn.verification.get("blocking", 0))),
+                    prompt=self.cfg.prompt,
+                    blocking=turn.verification.get("blocking", 0),
+                    warnings=max(0, turn.verification.get("violations", 0)
+                                 - turn.verification.get("blocking", 0)))
+        except Exception:
+            pass   # a measurement must never be able to break a turn
         try:
             self._flush_notifications()
         except Exception:
@@ -1268,7 +1465,33 @@ class Agent:
                       "or amend the contract.")
 
     def _gate(self, tool: Tool, args: dict) -> str | None:
-        """Return a block reason, or None if the action may proceed."""
+        """Return a block reason, or None if the action may proceed.
+
+        Four questions, cheapest and most absolute first: does the session
+        hold the capability at all (tool policy), does the prompt forbid
+        this action (guardrail), does the autonomy ladder allow it, and is
+        this a known dead end. The policy goes first deliberately — it is
+        the operator's answer, and no amount of autonomy should be able to
+        talk past a capability the session was never given.
+        """
+        if self.tool_policy is not None:
+            try:
+                decision = self.tool_policy.evaluate(tool.name, args)
+            except Exception:
+                decision = None
+            if decision is not None:
+                if decision.denied:
+                    return f"{decision.reason} [policy:{decision.rule}]"
+                if decision.outcome == POLICY_ASK:
+                    return "ASK"
+        if self.guardrail is not None:
+            try:
+                reason = self.guardrail.block_reason(
+                    self._action_facts(tool.name, args))
+            except Exception:
+                reason = None
+            if reason:
+                return reason
         # autonomy ladder (§22)
         if tool.name in _MUTATING_TOOLS:
             if self.autonomy <= 1:
@@ -1323,6 +1546,7 @@ class Agent:
                             causation_id=causation_id)
             return
 
+        self._turn_tool_names.append(ev.name)
         block = self._gate(tool, ev.args)
         if block and block != "ASK":
             ev.status = "blocked"
@@ -1342,6 +1566,12 @@ class Agent:
                 ev.result = "ERROR: user denied this action. Ask the user " \
                             "how to proceed or choose another approach."
                 return
+            # A real approval is what "ask before irreversible" is asking
+            # for, so it is recorded as one: the next identical call in
+            # this turn is no longer unapproved.
+            self._turn_approvals.add(ev.name)
+        elif self.cfg.auto_approve:
+            self._turn_approvals.add(ev.name)
 
         # A2/I3: snapshot BEFORE any mutation — no write without a
         # committed recovery path
@@ -1363,6 +1593,15 @@ class Agent:
                         actor="sovereign", provenance="model",
                         causation_id=causation_id,
                         correlation_id=clause_id)
+        if ev.name in ("read_file", "list_dir", "file_info"):
+            target = ev.args.get("path")
+            if target:
+                self._turn_reads.add(str(target))
+        if self.tool_policy is not None:
+            try:
+                self.tool_policy.record_call(ev.name)
+            except Exception:
+                pass
 
         on_status(f"running:{ev.name}")
         # v3: if the Speculator already prefetched this exact read-only
