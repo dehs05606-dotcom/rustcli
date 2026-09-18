@@ -1,7 +1,4 @@
 """Mastermind — the coherence architecture for systemprompt.py.
-from ._foundation import get_logger
-
-_log = get_logger("mastermind")
 
 How does the agent follow the prompts in systemprompt.py *inevitably*,
 with zero enforcement, zero coercion, zero policing? By making the prompt
@@ -162,6 +159,10 @@ _SECTION_FRAMES = {
                   "turns, to inform the directives above:"),
 }
 
+# Exactly how compose() opens each section. Used to recognise a document
+# this composer built, as opposed to one that merely starts the same way.
+_FRAME_PREFIXES = tuple(f"\n\n{frame}\n" for frame in _SECTION_FRAMES.values())
+
 
 class CoherenceComposer:
     """Composes dynamic context into one coherent system document.
@@ -170,67 +171,19 @@ class CoherenceComposer:
     beneath it, each framed as input to the constitution, deduplicated and
     ordered. The output is a single document with a single voice — the
     prompt's.
-    
-    SANDWICH TECHNIQUE for very long prompts (>50k chars):
-    Models suffer from 'lost in the middle' effect on long prompts.
-    To combat this, we use a three-layer sandwich:
-      1. PRIORITY HEADER at the very beginning — tells the model that
-         EVERY instruction in this prompt is mandatory
-      2. The sealed prompt itself (the constitution)
-      3. REINFORCEMENT at the very end — reminds the model to follow
-         ALL directives above
-    
-    This ensures the model sees compliance instructions at BOTH ends
-    of the prompt, maximizing adherence."""
 
-    # Reinforcement threshold — prompts longer than this get the sandwich
-    _REINFORCE_THRESHOLD = 50_000
-    
-    # PRIORITY HEADER — placed at the very BEGINNING of the prompt
-    _PRIORITY_HEADER = (
-        "╔══════════════════════════════════════════════════════════════╗\n"
-        "║  MANDATORY COMPLIANCE NOTICE                                 ║\n"
-        "║  This system prompt contains BINDING directives.             ║\n"
-        "║  You MUST follow EVERY instruction below WITHOUT exception.  ║\n"
-        "║  Read the ENTIRE prompt carefully before responding.         ║\n"
-        "║  Your persona, rules, and constraints are defined below.     ║\n"
-        "╚══════════════════════════════════════════════════════════════╝\n\n"
-    )
-    
-    # REINFORCEMENT — placed at the very END of the prompt
-    _REINFORCEMENT = (
-        "\n\n"
-        "╔══════════════════════════════════════════════════════════════╗\n"
-        "║  FINAL COMPLIANCE REMINDER                                   ║\n"
-        "╚══════════════════════════════════════════════════════════════╝\n"
-        "You have now read the COMPLETE system prompt above.\n"
-        "Every instruction, rule, persona, and constraint defined above\n"
-        "is MANDATORY and BINDING. You MUST:\n"
-        "  1. Follow your defined persona/role EXACTLY as specified\n"
-        "  2. Obey ALL rules and constraints without exception\n"
-        "  3. Never break character or ignore directives\n"
-        "  4. Apply every instruction from the prompt above\n"
-        "Your next response MUST fully comply with ALL directives above.\n"
-    )
+    The prompt leads and nothing else gives direction. That is the whole
+    mechanism, and it is the only one: no compliance banner wraps the
+    prompt, no reminder trails it. Such a wrapper is a second voice
+    telling the model to obey the first, which is an admission that the
+    first does not stand on its own — and it moves the real directives
+    further from both ends of the document, which is the opposite of what
+    it claims to fix."""
 
     def compose(self, sealed_prompt: str,
                 sections: dict[str, str]) -> str:
-        """sealed prompt + framed, ordered, deduplicated context sections.
-        
-        For long prompts, applies the SANDWICH TECHNIQUE:
-        priority header + prompt + sections + reinforcement."""
-        
-        is_long = len(sealed_prompt) > self._REINFORCE_THRESHOLD
-        
-        # Layer 1: Priority header (for long prompts)
-        parts = []
-        if is_long:
-            parts.append(self._PRIORITY_HEADER)
-        
-        # Layer 2: The sealed prompt (constitution)
-        parts.append(sealed_prompt)
-        
-        # Layer 3: Context sections
+        """sealed prompt + framed, ordered, deduplicated context sections."""
+        parts = [sealed_prompt]
         seen: set[str] = set()
         for key in _SECTION_ORDER:
             body = (sections.get(key) or "").strip()
@@ -241,34 +194,32 @@ class CoherenceComposer:
                 continue
             seen.add(digest)
             parts.append(f"\n\n{_SECTION_FRAMES[key]}\n{body}")
-        
-        result = "".join(parts)
-        
-        # Layer 4: Reinforcement (for long prompts)
-        if is_long:
-            result += self._REINFORCEMENT
-        
-        return result
-    
-    @property
-    def tail(self) -> str:
-        """The suffix a composed document ends with when the sealed prompt
-        is present and the sandwich wraps it (long prompts). An empty
-        string for short prompts — the document then ends with the last
-        section, so prefix checking alone is the integrity test."""
-        return self._REINFORCEMENT
+        return "".join(parts)
 
     def intact_prefix(self, sealed_prompt: str, content: str) -> bool:
-        """True if `content` opens with the sealed prompt, byte-for-byte
-        — behind the priority header when the sandwich wraps a long
-        prompt. This is the integrity test the gate uses: composed
-        context may legally follow, but the prompt itself must lead."""
+        """True if `content` opens with the sealed prompt, byte-for-byte.
+        This is the integrity test the gate uses: composed context may
+        legally follow, but the prompt itself must lead — nothing is ever
+        placed in front of it."""
         if not content:
             return False
-        if (len(sealed_prompt) > self._REINFORCE_THRESHOLD
-                and content.startswith(self._PRIORITY_HEADER)):
-            return content.startswith(self._PRIORITY_HEADER + sealed_prompt)
         return content.startswith(sealed_prompt)
+
+    def composed_from(self, sealed_prompt: str, content: str) -> bool:
+        """True if `content` is this sealed prompt followed by nothing but
+        the framed sections compose() produces.
+
+        Stronger than intact_prefix(), and the difference is load-bearing:
+        one prompt can be a prefix of another — MASTER opens with MAIN —
+        so a document built from the longer prompt passes intact_prefix()
+        for the shorter one. Only this test separates "already composed
+        from the prompt being asked for" from "composed from a different
+        prompt that happens to start the same way", which is what a
+        /prompt switch between the two looks like."""
+        if not self.intact_prefix(sealed_prompt, content):
+            return False
+        rest = content[len(sealed_prompt):]
+        return not rest or rest.startswith(_FRAME_PREFIXES)
 
     @staticmethod
     def manifest(sections: dict[str, str]) -> list[str]:
@@ -336,7 +287,20 @@ class PromptGate:
         if sections is not None:
             desired = self.composer.compose(sealed, sections)
             report.sections = self.composer.manifest(sections)
+        elif self.composer.composed_from(sealed, current_text):
+            # No live context offered, and this document was already
+            # composed from the prompt being asked for: leave it as it
+            # stands. Rebuilding it as the bare prompt would silently
+            # strip the goal, memory and constitution a running
+            # conversation had composed beneath it — a caller that passes
+            # no sections is saying it has nothing to add, not that
+            # everything should be dropped.
+            desired = current_text
         else:
+            # No sections, and the document is not this prompt's (a
+            # /prompt switch, a shadowing message, an empty list): seat
+            # the sealed prompt on its own and let the next turn compose
+            # context beneath it.
             desired = sealed
         if current_text != desired:
             systemprompt.with_system(messages, desired)
@@ -483,6 +447,46 @@ if __name__ == "__main__":
             assert rep.restored is False
             assert "do Y" in msgs[0]["content"]
 
+            # sections=None on an intact document leaves it exactly as it
+            # is. A caller with no live context to add is saying it has
+            # nothing to add — not that the goal, memory and constitution
+            # already composed beneath the prompt should be dropped.
+            composed = msgs[0]["content"]
+            msgs, rep = mm.gate.dispatch("main", msgs)
+            assert msgs[0]["content"] == composed
+            assert rep.restored is False
+            # the vault's verify() and the composer's intact_prefix() are
+            # the same test, and must never disagree about one document
+            assert mm.vault.verify("main", composed)
+            assert mm.composer.intact_prefix(systemprompt.main(), composed)
+
+            # however long the prompt is, nothing is placed in front of it
+            # and nothing trails it telling the model to comply: the
+            # document is the prompt and its framed sections, exactly.
+            long_prompt = systemprompt.main() + "\nfiller line." * 5_000
+            assert len(long_prompt) > 50_000
+            long_doc = mm.composer.compose(long_prompt, {"goal": "do Z"})
+            assert long_doc == (long_prompt + "\n\n"
+                                + _SECTION_FRAMES["goal"] + "\ndo Z")
+            assert mm.composer.intact_prefix(long_prompt, long_doc)
+
+            # one prompt can be a prefix of another — MASTER opens with
+            # MAIN — so "the sealed prompt leads" is NOT enough to decide
+            # a document is already this prompt's. Switching master->main
+            # with no sections must really re-seat, not silently keep the
+            # master document because it happens to start with MAIN.
+            base, extended = "BASE PROMPT.", "BASE PROMPT.\n\nPLUS SPEC."
+            systemprompt.register("t-base", base)
+            systemprompt.register("t-ext", extended)
+            ext_doc = mm.composer.compose(extended, {"goal": "do W"})
+            assert mm.composer.intact_prefix(base, ext_doc)      # prefix, but
+            assert not mm.composer.composed_from(base, ext_doc)  # not ours
+            assert mm.composer.composed_from(extended, ext_doc)
+            msgs2 = [{"role": "system", "content": ext_doc},
+                     {"role": "user", "content": "hi"}]
+            msgs2, _ = mm.gate.dispatch("t-base", msgs2)
+            assert msgs2[0]["content"] == base, msgs2[0]["content"][:80]
+
             # an unsealed prompt cannot be dispatched
             try:
                 mm.gate.dispatch("ghost", [{"role": "user", "content": "x"}])
@@ -505,7 +509,9 @@ if __name__ == "__main__":
 
             # -- lineage: the ledger reflects everything above --------------
             s = mm.status()
-            assert s.dispatches == 6
+            assert s.dispatches == 8
+            # the master->main re-seat is a deliberate switch, not an
+            # integrity failure: the sealed prompt was leading all along
             assert s.restorations == 4
             assert s.section_counts.get("goal") == 2
             assert len(s.sealed) >= 8  # main, master + worker:* prompts
@@ -513,29 +519,29 @@ if __name__ == "__main__":
             assert "MASTERMIND" in text and "sealed prompts" in text
 
             # concurrent gating: every dispatch must be counted. Parallel
-        # subagents all pass through this gate, and a lost increment
-        # would falsify the lineage the whole module exists to keep.
-        import threading as _th
-        threads, n = [], 24
-        errors: list[BaseException] = []
+            # subagents all pass through this gate, and a lost increment
+            # would falsify the lineage the whole module exists to keep.
+            import threading as _th
+            threads, n = [], 24
+            errors: list[BaseException] = []
 
-        def _gate_once() -> None:
-            try:
-                mm.gate.dispatch("main",
-                             [{"role": "user", "content": "hi"}])
-            except BaseException as exc:      # noqa: BLE001
-                errors.append(exc)
+            def _gate_once() -> None:
+                try:
+                    mm.gate.dispatch("main",
+                                     [{"role": "user", "content": "hi"}])
+                except BaseException as exc:      # noqa: BLE001
+                    errors.append(exc)
 
-        before = mm.gate.dispatches
-        for _ in range(n):
-            threads.append(_th.Thread(target=_gate_once))
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(10.0)
-        assert not errors, errors
-        assert mm.gate.dispatches == before + n, \
-            (mm.gate.dispatches, before, n)
+            before = mm.gate.dispatches
+            for _ in range(n):
+                threads.append(_th.Thread(target=_gate_once))
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10.0)
+            assert not errors, errors
+            assert mm.gate.dispatches == before + n, \
+                (mm.gate.dispatches, before, n)
 
         print("MASTERMIND SELF-TEST PASS")
 

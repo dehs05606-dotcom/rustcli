@@ -562,24 +562,14 @@ class Agent:
         full_text = user_text
         user_text = self._cap_user_message(user_text)
 
-        # AGGRESSIVE REINFORCEMENT: For very long system prompts, add a
-        # compliance reminder before EVERY user message. This combats the
-        # 'lost in the middle' effect where models lose focus on long prompts.
-        # The reminder is placed right before the user message so it's the
-        # LAST thing the model sees before generating a response.
-        # Use a user turn to keep the system instruction at position 0.
-        sys_len = len(self.messages[0].get("content", "")) if self.messages else 0
-        if sys_len > 50_000:
-            self.messages.append({
-                "role": "user",
-                "content": (
-                    "[MANDATORY COMPLIANCE] Before responding, recall and apply "
-                    "ALL directives from the system prompt. Your persona, rules, "
-                    "and constraints are ALL in full effect. Respond in complete "
-                    "compliance with every instruction you were given."
-                )
-            })
-
+        # The user's message goes in as the user's message, alone. No
+        # compliance reminder is synthesised in front of it: a reminder
+        # written as a user turn competes with the system prompt instead
+        # of reinforcing it, gives the model two consecutive user turns,
+        # and survives in the history long after the turn it was meant
+        # for (the APIError path below can only pop the real message).
+        # The prompt's standing comes from being the sealed, leading
+        # document — see mastermind.CoherenceComposer.
         self.messages.append({"role": "user", "content": user_text})
         user_ev = self.log.append("user.message",
                                   {"text": full_text,
@@ -2224,7 +2214,8 @@ class Agent:
         brief as the worker's system prompt; score deterministically from
         the reply's structure (STATUS/SUMMARY contract + substance)."""
         from . import systemprompt
-        system = systemprompt.WORKER.format(role_brief=brief)
+        from .team import MAX_WORKERS
+        system = systemprompt.worker_brief(brief, MAX_WORKERS)
         result = chat_blocking(
             self.provider, self.model, self.effort,
             [{"role": "system", "content": system},
@@ -2308,8 +2299,7 @@ class Agent:
         the reply's structure (same yardstick as evolution)."""
         from . import systemprompt
         from .team import MAX_WORKERS
-        system = systemprompt.WORKER.format(role_brief=draft.brief,
-                                            max_workers=MAX_WORKERS)
+        system = systemprompt.worker_brief(draft.brief, MAX_WORKERS)
         result = chat_blocking(
             self.provider, self.model, self.effort,
             [{"role": "system", "content": system},

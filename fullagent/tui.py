@@ -2431,8 +2431,9 @@ class UI:
 
     def _cmd_prompt(self, arg: str) -> None:
         """Select which system prompt the model gets (systemprompt.py is
-        the single source). 'main' is the compact prompt; 'master' is the
-        extended 130k+ specification prompt."""
+        the single source). 'main' is the compact prompt; 'master' is
+        'main' plus the master specification, when project.txt is
+        installed beside the package."""
         from . import systemprompt
         sub = arg.strip().lower()
         if sub in ("", "list", "status"):
@@ -2442,6 +2443,10 @@ class UI:
                 mark = "●" if name == current else "○"
                 size = len(systemprompt.get(name))
                 lines.append(f"  {mark} {name:<8} {size:>8,} chars")
+            if not systemprompt.spec_present():
+                lines.append("  note: project.txt is not installed beside "
+                             "the package, so 'master' is identical to "
+                             "'main'.")
             lines.append("switch: /prompt main · /prompt master")
             self.print_info("\n".join(lines), C["cyan"])
             return

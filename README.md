@@ -508,8 +508,14 @@ Two prompts ship in the registry, switchable live with `/prompt`:
 
 | Name | Size | What it is |
 |---|---|---|
-| `main` | ~1.6k chars | the compact sovereign-agent prompt (default) |
-| `master` | **136,928 chars** | MAIN + the full master specification (`project.txt`) embedded — the entire architecture, invariants, subsystem contracts and Goal-Mode grammar in context |
+| `main` | ~4.2k chars | the compact sovereign-agent prompt (default) |
+| `master` | ~137k chars *(with the spec installed)* | MAIN + the full master specification (`project.txt`) embedded — the entire architecture, invariants, subsystem contracts and Goal-Mode grammar in context |
+
+`project.txt` is **not** in this repository; it is installed beside the
+package. When it is absent, `master` is exactly `main` — the prompt never
+announces a specification it cannot supply, and `/prompt` says so in its
+listing. Check with `python3 -m fullagent.systemprompt`, which prints the
+real `MASTER` size.
 
 Add more prompts later by dropping a constant in `systemprompt.py` and
 registering it in the `PROMPTS` map (or call `register()` at runtime).

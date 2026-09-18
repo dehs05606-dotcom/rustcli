@@ -153,10 +153,20 @@ def scout() -> str:
     return SCOUT
 
 
+def worker_brief(brief: str, max_workers: int) -> str:
+    """A worker system prompt for an arbitrary brief.
+
+    Used for briefs that are not (yet) in ROLE_BRIEFS — an evolution
+    candidate, a drafted role. Every caller goes through here rather than
+    calling WORKER.format() itself, so a caller can never miss a
+    placeholder the template grew."""
+    return WORKER.format(role_brief=brief, max_workers=max_workers)
+
+
 def worker(role: str, max_workers: int) -> str:
     """A worker sub-agent's system prompt for the given role."""
     brief = ROLE_BRIEFS.get(role, ROLE_BRIEFS["coder"])
-    return WORKER.format(role_brief=brief, max_workers=max_workers)
+    return worker_brief(brief, max_workers)
 
 
 def with_system(messages: list[dict], system: str) -> list[dict]:
@@ -179,7 +189,10 @@ def with_system(messages: list[dict], system: str) -> list[dict]:
 # This is the second, much larger system prompt. It embeds the full master
 # specification (project.txt) so the model carries the entire architecture,
 # invariants, subsystem contracts and Goal-Mode grammar in context. It is
-# far longer than MAIN (which is ~2k chars) — by design.
+# far longer than MAIN (which is ~4k chars) — by design.
+#
+# project.txt is NOT in the repository; it ships beside this module. When
+# it is absent, MASTER degrades to exactly MAIN — see _build_master().
 
 def _load_master_spec() -> str:
     """Load the master specification (project.txt) that ships beside this
@@ -195,17 +208,39 @@ def _load_master_spec() -> str:
 
 _SPEC = _load_master_spec()
 
-MASTER = (
-    MAIN
-    + "\n\n"
-    + "=" * 72
-    + "\nFULL MASTER SPECIFICATION — the architecture you operate "
-      "within. Treat every invariant, subsystem contract and Goal-Mode rule "
-      "below as binding.\n"
-    + "=" * 72
-    + "\n\n"
-    + _SPEC
-)
+
+def _build_master(spec: str) -> str:
+    """MAIN, plus the master specification when there actually is one.
+
+    With no spec, MASTER is exactly MAIN. The alternative — emitting the
+    "specification below is binding" banner over an empty body — is worse
+    than saying nothing: the model is told a binding document follows and
+    finds nothing there, so the one prompt that is supposed to carry the
+    most authority is the one that opens by being wrong."""
+    if not spec.strip():
+        return MAIN
+    return (
+        MAIN
+        + "\n\n"
+        + "=" * 72
+        + "\nFULL MASTER SPECIFICATION — the architecture you operate "
+          "within. Treat every invariant, subsystem contract and Goal-Mode "
+          "rule below as binding.\n"
+        + "=" * 72
+        + "\n\n"
+        + spec
+    )
+
+
+MASTER = _build_master(_SPEC)
+
+
+def spec_present() -> bool:
+    """True when project.txt was found beside this module and loaded.
+
+    False means `master` and `main` are the same prompt — worth surfacing
+    rather than leaving the user to wonder why the two are identical."""
+    return bool(_SPEC.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +278,11 @@ if __name__ == "__main__":
     assert main() and scout()
     for role in ROLE_BRIEFS:
         assert worker(role, 8)
+        assert "8 workers" in worker(role, 8)
+    # an arbitrary brief formats through the same builder — every
+    # placeholder the template has is always filled
+    assert "8 workers" in worker_brief("a CANDIDATE brief.", 8)
+    assert "a CANDIDATE brief." in worker_brief("a CANDIDATE brief.", 8)
     msgs = [{"role": "user", "content": "hi"}]
     with_system(msgs, main())
     assert msgs[0]["role"] == "system" and msgs[0]["content"] == MAIN
@@ -250,13 +290,22 @@ if __name__ == "__main__":
     assert len([m for m in msgs if m["role"] == "system"]) == 1
     assert msgs[0]["content"] == SCOUT
 
-    # the extended MASTER prompt must be very long and strictly larger
-    # than MAIN; the registry must resolve it.
-    assert len(MASTER) > len(MAIN)
+    # MASTER carries the spec when project.txt is present, and is exactly
+    # MAIN when it is not — never a banner promising a spec that is absent.
+    if spec_present():
+        assert len(MASTER) > len(MAIN) and _SPEC in MASTER
+    else:
+        assert MASTER == MAIN
+    assert _build_master("") == MAIN
+    assert _build_master("   \n ") == MAIN
+    assert "SPEC BODY" in _build_master("SPEC BODY")
+    assert _build_master("SPEC BODY").startswith(MAIN)
     assert get("master") == MASTER
     assert get("main") == MAIN
     assert get("nope") == MAIN  # unknown name falls back, never empty
     register("custom", "hello prompt")
     assert get("custom") == "hello prompt"
     assert "master" in names() and "main" in names()
-    print(f"SYSTEMPROMPT SELF-TEST PASS  (MASTER = {len(MASTER):,} chars)")
+    note = "with spec" if spec_present() else "no project.txt — MASTER = MAIN"
+    print(f"SYSTEMPROMPT SELF-TEST PASS  "
+          f"(MASTER = {len(MASTER):,} chars, {note})")
