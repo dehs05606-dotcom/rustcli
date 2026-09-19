@@ -30,19 +30,23 @@
   ],
   "clean_rate": 1.0,
   "fingerprint": {
-    "root": "1b168bd224e2dbe1",
+    "root": "6e2a3998178facba",
     "surfaces": {
       "clauses": "1142af2bd273ff3e",
       "constitution": "b94bca5b22783b36",
       "contracts": "9107681a3974ee84",
       "envelopes": "48f25e03fbb6da02",
+      "failure-catalogue": "b778bbb4eae50731",
+      "policy-metamodel": "de33d494581b68c3",
       "policy-pipeline": "08030f700b452a37",
       "prompt": "6d51255b81189681",
       "recovery": "35d991d90f9d7aea",
+      "threat-model": "8e10df621dfb378a",
       "verification": "6a725369fe5aaa48"
     }
   },
   "history": [
+    1.0,
     1.0,
     1.0
   ],
@@ -78,6 +82,6 @@
     "tool-usage.use-web_fetch-to-read-specific-urls",
     "understand-first-read-the-codebase-before.never-assume"
   ],
-  "recorded_by": "directive-4",
+  "recorded_by": "directive-5",
   "score": 1.0
 }

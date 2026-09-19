@@ -1379,6 +1379,480 @@ def _runbook_invariants() -> list[Invariant]:
     ]
 
 
+def _assurance_invariants() -> list[Invariant]:
+    from . import assurance as asr
+
+    def every_defect_explains_itself() -> Result:
+        for kind, pair in sorted(asr.DEFECTS.items()):
+            what, remedy = pair
+            if not what or not remedy:
+                return fails("an assurance defect does not say what would "
+                             "fix it", {"kind": kind})
+        return holds(len(asr.DEFECTS))
+
+    def the_shipped_case_reaches_every_node() -> Result:
+        """No node hides in the case without a root reaching it.
+
+        An orphan is already a defect; this is the stronger claim that
+        the shipped case has none, so every sentence in it is one a
+        reader can get to from the top.
+        """
+        case = asr.shipped_case()
+        stranded = sorted(set(case.nodes) - case.reachable())
+        if stranded:
+            return fails("the shipped case has nodes no root reaches",
+                         {"nodes": stranded[:5]})
+        return holds(len(case.nodes))
+
+    def every_claim_has_something_under_it() -> Result:
+        case = asr.shipped_case()
+        bare = sorted(n.id for n in case.nodes.values()
+                      if n.kind in (asr.CLAIM, asr.INFERENCE)
+                      and not n.children)
+        if bare:
+            return fails("a claim or inference in the shipped case has no "
+                         "children at all", {"nodes": bare[:5]})
+        return holds(len(case.nodes))
+
+    def every_evidence_node_can_produce() -> Result:
+        case = asr.shipped_case()
+        idle = sorted(n.id for n in case.nodes.values()
+                      if n.kind == asr.EVIDENCE and n.producer is None)
+        if idle:
+            return fails("an evidence node has no producer, so it can only "
+                         "assert", {"nodes": idle})
+        return holds(sum(1 for n in case.nodes.values()
+                         if n.kind == asr.EVIDENCE))
+
+    def every_assumption_says_what_it_assumes() -> Result:
+        case = asr.shipped_case()
+        silent = sorted(n.id for n in case.nodes.values()
+                        if n.kind == asr.ASSUMPTION and not n.text.strip())
+        if silent:
+            return fails("an assumption in the shipped case is blank",
+                         {"nodes": silent})
+        return holds(len(case.assumed))
+
+    return [
+        Invariant("assurance-defects-explain-themselves", "assurance",
+                  TOTALITY,
+                  "every assurance defect says what would fix it",
+                  every_defect_explains_itself, exhaustive=True),
+        Invariant("shipped-case-has-no-orphans", "assurance", CLOSURE,
+                  "every node in the shipped case is reachable from a root",
+                  the_shipped_case_reaches_every_node, exhaustive=True),
+        Invariant("no-claim-stands-alone", "assurance", TOTALITY,
+                  "no claim or inference in the shipped case is childless",
+                  every_claim_has_something_under_it, exhaustive=True),
+        Invariant("evidence-can-be-gathered", "assurance", TOTALITY,
+                  "every evidence node has a producer that can be run",
+                  every_evidence_node_can_produce, exhaustive=True),
+        Invariant("assumptions-are-stated", "assurance", TOTALITY,
+                  "every assumption in the shipped case says what it "
+                  "assumes", every_assumption_says_what_it_assumes,
+                  exhaustive=True),
+    ]
+
+
+def _policymeta_invariants() -> list[Invariant]:
+    from . import policymeta as pm
+    from .policypipeline import DEFAULT_STAGES
+
+    def every_stage_is_modelled() -> Result:
+        shipped = {s.name for s in DEFAULT_STAGES}
+        missing = sorted(shipped - set(pm.STAGE_MODELS))
+        phantom = sorted(set(pm.STAGE_MODELS) - shipped)
+        if missing or phantom:
+            return fails("the metamodel and the pipeline name different "
+                         "stages", {"unmodelled": missing,
+                                    "phantom": phantom})
+        return holds(len(shipped))
+
+    def the_spec_is_order_free() -> Result:
+        """`spec_outcome` must not depend on the order it is given.
+
+        Enumerated over every outcome vector and its reverse: the spec is
+        what reorder-safety is proved against, so a spec that quietly
+        cared about order would make that proof meaningless.
+        """
+        import itertools
+        cases = 0
+        for vector in itertools.product(pm.OUTCOMES, repeat=4):
+            cases += 1
+            if pm.spec_outcome(vector) != pm.spec_outcome(vector[::-1]):
+                return fails("the specification depends on stage order",
+                             {"vector": list(vector)}, cases)
+        return holds(cases)
+
+    def every_property_is_registered() -> Result:
+        report = pm.verify_metamodel()
+        found = {p.id for p in report.properties}
+        declared = set(pm.PROPERTY_IDS)
+        if found != declared:
+            return fails("a meta-property is run but not declared, or "
+                         "declared but not run",
+                         {"unregistered": sorted(found - declared),
+                          "never-run": sorted(declared - found)})
+        return holds(len(declared))
+
+    def every_failure_kind_explains_itself() -> Result:
+        for kind, what in sorted(pm.FAILURES.items()):
+            if not what:
+                return fails("a metamodel failure kind has no explanation",
+                             {"kind": kind})
+        return holds(len(pm.FAILURES))
+
+    def a_deny_is_the_most_restrictive_answer() -> Result:
+        worst = max(pm.RESTRICTIVENESS, key=pm.RESTRICTIVENESS.get)
+        if worst != "deny":
+            return fails("something outranks a deny in the restrictiveness "
+                         "order, so 'widen' no longer means what it says",
+                         {"worst": worst})
+        if pm.RESTRICTIVENESS.get(pm.SKIP, 0) != 0:
+            return fails("a stage that skipped is ranked above one that "
+                         "checked and allowed", {})
+        return holds(len(pm.RESTRICTIVENESS))
+
+    return [
+        Invariant("every-stage-is-modelled", "policymeta", TOTALITY,
+                  "the metamodel and the shipped pipeline name exactly the "
+                  "same stages", every_stage_is_modelled, exhaustive=True),
+        Invariant("spec-is-order-free", "policymeta", CONSISTENCY,
+                  "the ordering specification gives the same answer "
+                  "whatever order it reads the stages in",
+                  the_spec_is_order_free, exhaustive=True),
+        Invariant("meta-properties-are-registered", "policymeta",
+                  CONSISTENCY,
+                  "every meta-property that runs is declared, and every "
+                  "one declared runs", every_property_is_registered,
+                  exhaustive=True),
+        Invariant("metamodel-failures-explain-themselves", "policymeta",
+                  TOTALITY,
+                  "every metamodel failure kind says what it means",
+                  every_failure_kind_explains_itself, exhaustive=True),
+        Invariant("deny-is-the-ceiling", "policymeta", CLOSURE,
+                  "a deny is the most restrictive outcome and a skip the "
+                  "least, which is what makes 'widen' a word with a "
+                  "meaning", a_deny_is_the_most_restrictive_answer,
+                  exhaustive=True),
+    ]
+
+
+def _faultcatalogue_invariants() -> list[Invariant]:
+    from . import faultcatalogue as fc
+
+    def every_surveyed_class_is_accounted_for() -> Result:
+        """No class is merely absent: covered, or unreachable with a reason.
+
+        The coverage check itself runs the scenarios; this is the cheap
+        structural half, so a missing counterfactual is caught by the
+        invariant run as well as by the catalogue run.
+        """
+        targets = {(c.surface, c.target) for c in fc.counterfactuals()}
+        cases = 0
+        for surface in fc.SURFACES:
+            for code in surface.universe():
+                cases += 1
+                if (surface.id, code) in targets:
+                    continue
+                if code in fc.UNREACHABLE:
+                    continue
+                return fails("a typed refusal has neither a counterfactual "
+                             "nor a written reason it cannot be reached",
+                             {"surface": surface.id, "class": code}, cases)
+        return holds(cases)
+
+    def unreachable_claims_carry_a_reason() -> Result:
+        for code, why in sorted(fc.UNREACHABLE.items()):
+            if not why.strip():
+                return fails("a class is declared unreachable with no "
+                             "reason", {"class": code})
+        return holds(len(fc.UNREACHABLE))
+
+    def no_counterfactual_is_orphaned() -> Result:
+        known = {s.id: set(s.universe()) for s in fc.SURFACES}
+        for case in fc.counterfactuals():
+            if case.target not in known.get(case.surface, set()):
+                return fails("a counterfactual targets a class its surface "
+                             "does not declare",
+                             {"surface": case.surface,
+                              "class": case.target})
+        return holds(len(fc.counterfactuals()))
+
+    def catalogue_defects_explain_themselves() -> Result:
+        for kind, pair in sorted(fc.DEFECTS.items()):
+            what, remedy = pair
+            if not what or not remedy:
+                return fails("a catalogue defect does not say what would "
+                             "fix it", {"kind": kind})
+        return holds(len(fc.DEFECTS))
+
+    return [
+        Invariant("every-failure-class-is-surveyed", "faultcatalogue",
+                  TOTALITY,
+                  "every typed refusal has a counterfactual, or a written "
+                  "reason none can reach it",
+                  every_surveyed_class_is_accounted_for, exhaustive=True),
+        Invariant("unreachable-is-a-claim-with-a-reason", "faultcatalogue",
+                  TOTALITY,
+                  "no class is declared unreachable without saying why",
+                  unreachable_claims_carry_a_reason, exhaustive=True),
+        Invariant("no-orphan-counterfactuals", "faultcatalogue",
+                  CONSISTENCY,
+                  "every counterfactual targets a class its surface "
+                  "declares", no_counterfactual_is_orphaned,
+                  exhaustive=True),
+        Invariant("catalogue-defects-explain-themselves", "faultcatalogue",
+                  TOTALITY,
+                  "every catalogue defect says what would fix it",
+                  catalogue_defects_explain_themselves, exhaustive=True),
+    ]
+
+
+def _historicaudit_invariants() -> list[Invariant]:
+    from . import historicaudit as ha
+
+    def every_verdict_is_explained() -> Result:
+        for kind, pair in sorted(ha.VERDICTS.items()):
+            what, remedy = pair
+            if not what:
+                return fails("a replay verdict has no explanation",
+                             {"kind": kind})
+            if kind not in ha.JUDGED and not remedy:
+                return fails("a verdict that leaves a decision unjudged "
+                             "does not say what to do about it",
+                             {"kind": kind})
+        return holds(len(ha.VERDICTS))
+
+    def only_a_real_replay_counts_as_judged() -> Result:
+        """Nothing but agrees/differs may count as having re-checked.
+
+        The failure mode this guards is a report saying "12 of 12
+        re-checked" when most of them were unreplayable, which is the one
+        number an auditor would read and the one that must not be able to
+        drift.
+        """
+        if set(ha.JUDGED) != {ha.V_AGREES, ha.V_DIFFERS}:
+            return fails("a verdict other than agrees/differs counts as a "
+                         "re-check", {"judged": list(ha.JUDGED)})
+        return holds(len(ha.VERDICTS))
+
+    def the_limits_are_stated() -> Result:
+        if not ha.REPLAY_LIMITS:
+            return fails("replay declares no limits, which cannot be true",
+                         {})
+        for line in ha.REPLAY_LIMITS:
+            if len(line.strip()) < 20:
+                return fails("a stated replay limit says nothing",
+                             {"limit": line})
+        return holds(len(ha.REPLAY_LIMITS))
+
+    def a_newer_rule_never_governs_an_older_decision() -> Result:
+        """Exhaustive over a small ladder of bundle and decision positions.
+
+        The property is that `governing` picks the newest bundle sealed at
+        or before a decision, and never one sealed after it: a rule
+        written on Tuesday did not govern Monday, however much it looks
+        like it should have.
+        """
+        made = tuple(ha.Ruleset(f"d{i}", 0.0, {}, {}, f"v{i}", "", i)
+                     for i in range(6))
+        cases = 0
+        for seq in range(-1, 8):
+            cases += 1
+            picked = ha.governing(made, seq)
+            expected = max((b for b in made if 0 <= b.seq <= seq),
+                           key=lambda b: b.seq, default=None)
+            if picked is not expected:
+                return fails("governing() chose a ruleset that was not the "
+                             "newest one at or before the decision",
+                             {"seq": seq,
+                              "picked": picked.label if picked else None},
+                             cases)
+        return holds(cases)
+
+    return [
+        Invariant("replay-verdicts-explain-themselves", "historicaudit",
+                  TOTALITY,
+                  "every replay verdict says what it means, and every one "
+                  "that leaves a decision unjudged says what to do",
+                  every_verdict_is_explained, exhaustive=True),
+        Invariant("only-a-replay-counts-as-judged", "historicaudit",
+                  CLOSURE,
+                  "only agrees and differs count as having re-checked a "
+                  "decision", only_a_real_replay_counts_as_judged,
+                  exhaustive=True),
+        Invariant("replay-limits-are-stated", "historicaudit", TOTALITY,
+                  "replay carries its own limits in the report, not only "
+                  "in a docstring", the_limits_are_stated, exhaustive=True),
+        Invariant("rules-do-not-apply-backwards", "historicaudit",
+                  CONSISTENCY,
+                  "a decision is governed by the newest ruleset sealed at "
+                  "or before it, never by a later one",
+                  a_newer_rule_never_governs_an_older_decision,
+                  exhaustive=True),
+    ]
+
+
+def _assuranceboard_invariants() -> list[Invariant]:
+    from . import assuranceboard as ab
+
+    def unknown_is_louder_than_a_failure() -> Result:
+        if ab.LOUDNESS[ab.UNKNOWN] <= ab.LOUDNESS[ab.ATTENTION]:
+            return fails("an unmeasured cell sorts below a failing one, so "
+                         "'never checked' reads as quieter than 'checked "
+                         "and broken'", dict(ab.LOUDNESS))
+        if ab.LOUDNESS[ab.OK] != 0:
+            return fails("a clean cell is not the quietest state",
+                         dict(ab.LOUDNESS))
+        return holds(len(ab.LOUDNESS))
+
+    def every_state_is_ranked() -> Result:
+        missing = sorted(set(ab.STATES) - set(ab.LOUDNESS))
+        if missing:
+            return fails("a cell state has no place in the ordering",
+                         {"states": missing})
+        return holds(len(ab.STATES))
+
+    def only_an_unknown_cell_may_lack_a_source() -> Result:
+        """Enumerated over every state a cell can be in.
+
+        The board's whole claim is that a displayed figure names the seal
+        it came from. A cell in any state but `unknown` with no source
+        breaks it, so the rule is checked as a property of `Cell` rather
+        than trusted to each reader.
+        """
+        cases = 0
+        for state in ab.STATES:
+            for source, seq in (("", -1), ("some.event", 3)):
+                cases += 1
+                cell = ab.Cell("k", "K", state, "1", source=source, seq=seq)
+                board = ab.Board((cell,))
+                expected = bool(source) or state == ab.UNKNOWN
+                if board.traceable != expected:
+                    return fails("a cell with no sealed source was "
+                                 "reported as traceable",
+                                 {"state": state, "source": source}, cases)
+        return holds(cases)
+
+    def every_cell_key_has_a_reader() -> Result:
+        keys = [key for key, _ in ab.READERS]
+        if len(keys) != len(set(keys)):
+            return fails("two readers claim the same cell", {"keys": keys})
+        unknown = sorted(set(ab.FILLS) - set(keys))
+        if unknown:
+            return fails("a command is advertised for a cell nobody reads",
+                         {"cells": unknown})
+        return holds(len(keys))
+
+    return [
+        Invariant("unmeasured-is-the-loudest", "assuranceboard", CLOSURE,
+                  "an unmeasured cell outranks a failing one, because a "
+                  "failure has an owner and an unmeasured surface does not",
+                  unknown_is_louder_than_a_failure, exhaustive=True),
+        Invariant("every-state-is-ranked", "assuranceboard", TOTALITY,
+                  "every cell state has a place in the ordering",
+                  every_state_is_ranked, exhaustive=True),
+        Invariant("figures-name-their-seal", "assuranceboard", POSTCONDITION,
+                  "only a cell displaying no figure may lack a sealed "
+                  "source", only_an_unknown_cell_may_lack_a_source,
+                  exhaustive=True),
+        Invariant("every-cell-has-one-reader", "assuranceboard",
+                  CONSISTENCY,
+                  "each cell has exactly one reader, and every advertised "
+                  "command fills a cell that exists",
+                  every_cell_key_has_a_reader, exhaustive=True),
+    ]
+
+
+def _threatpin_invariants() -> list[Invariant]:
+    from . import threatpins as tp
+
+    def every_risk_says_where_it_is_written() -> Result:
+        for risk in tp.RISKS:
+            if len(risk.statement.strip()) < 40:
+                return fails("a documented risk is stated too briefly to "
+                             "be a limit anyone could act on",
+                             {"risk": risk.id})
+            if not risk.where.strip():
+                return fails("a risk does not say where it is documented, "
+                             "so a change to it cannot be followed through "
+                             "to the text that states it", {"risk": risk.id})
+        return holds(len(tp.RISKS))
+
+    def a_narrowing_is_not_silently_a_pass() -> Result:
+        """Both directions need a person.
+
+        A widening is obviously a decision. A narrowing is the one that
+        gets waved through -- and a document that overstates a limit
+        misleads exactly as much as one that understates it.
+        """
+        if tp.P_NARROWED not in tp.NEEDS_REVIEW:
+            return fails("a narrowing passes without anyone deciding, so "
+                         "the documents stay wrong", {})
+        for kind in (tp.P_WIDENED, tp.P_UNRECORDED, tp.P_STALE,
+                     tp.P_UNMEASURABLE):
+            if kind not in tp.NEEDS_REVIEW:
+                return fails("a verdict that is not 'held' counts as clean",
+                             {"kind": kind})
+        if tp.P_HELD in tp.NEEDS_REVIEW:
+            return fails("an unchanged posture asks for a decision every "
+                         "run, which is how a gate gets muted", {})
+        return holds(len(tp.VERDICTS))
+
+    def every_verdict_explains_itself() -> Result:
+        for kind, pair in sorted(tp.VERDICTS.items()):
+            what, remedy = pair
+            if not what:
+                return fails("a threat-model verdict has no explanation",
+                             {"kind": kind})
+            if kind in tp.NEEDS_REVIEW and not remedy:
+                return fails("a verdict that needs a person does not say "
+                             "what they should do", {"kind": kind})
+        return holds(len(tp.VERDICTS))
+
+    def re_recording_needs_a_name_and_a_reason() -> Result:
+        """Exhaustive over the four ways to leave one of them out."""
+        import tempfile
+        from pathlib import Path as _Path
+
+        work = _Path(tempfile.mkdtemp(prefix="fa-inv-pins-"))
+        probe = (tp.Risk("probe", "a risk", "here",
+                         lambda: tp.Measurement(0, "none")),)
+        cases = 0
+        for who, why in (("", ""), ("someone", ""), ("", "a reason"),
+                         ("  ", "  ")):
+            cases += 1
+            try:
+                tp.record(who, why, work, risks=probe)
+            except ValueError:
+                continue
+            return fails("the threat model was re-recorded with nobody's "
+                         "name or no reason on it",
+                         {"who": who, "why": why}, cases)
+        return holds(cases)
+
+    return [
+        Invariant("risks-name-where-they-are-written", "threatpins",
+                  TOTALITY,
+                  "every pinned risk states the limit in full and says "
+                  "which documents carry it",
+                  every_risk_says_where_it_is_written, exhaustive=True),
+        Invariant("both-directions-need-a-person", "threatpins", CLOSURE,
+                  "a narrowing needs a decision just as a widening does, "
+                  "and an unchanged posture needs none",
+                  a_narrowing_is_not_silently_a_pass, exhaustive=True),
+        Invariant("threat-verdicts-explain-themselves", "threatpins",
+                  TOTALITY,
+                  "every threat-model verdict says what it means and what "
+                  "to do", every_verdict_explains_itself, exhaustive=True),
+        Invariant("re-recording-is-signed", "threatpins", PRECONDITION,
+                  "the threat model cannot be re-recorded without a named "
+                  "person and a reason",
+                  re_recording_needs_a_name_and_a_reason, exhaustive=True),
+    ]
+
+
 def all_invariants() -> tuple[Invariant, ...]:
     out: list[Invariant] = []
     for builder in (_toolcontract_invariants, _policy_invariants,
@@ -1387,7 +1861,10 @@ def all_invariants() -> tuple[Invariant, ...]:
                     _constitution_invariants, _envelope_invariants,
                     _releasegate_invariants, _calibration_invariants,
                     _invariantloop_invariants, _budget_invariants,
-                    _runbook_invariants):
+                    _runbook_invariants, _assurance_invariants,
+                    _policymeta_invariants, _faultcatalogue_invariants,
+                    _historicaudit_invariants, _assuranceboard_invariants,
+                    _threatpin_invariants):
         out.extend(builder())
     return tuple(out)
 

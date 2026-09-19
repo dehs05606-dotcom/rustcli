@@ -1035,6 +1035,53 @@ boundary. A handler raising `KeyboardInterrupt` or `SystemExit` killed
 the worker thread silently and the call came back misclassified. Fixed,
 with the case pinned in `tests/test_provable_platform.py`.
 
+### The assurance layer
+
+The layers above answer "is this call allowed", "did it do what it said",
+"can we explain it afterwards". These six answer a different question:
+**what does this repo claim about itself, and what is each claim standing
+on.**
+
+| Module | The state it makes unreachable |
+|---|---|
+| **assurance.py** | "Compliant" as a test count. Every compliance claim is a node in a machine-checkable argument tree — claim → inference → sealed evidence — and evidence is a *function that runs*, not a sentence. An assumption is a visible node, so an assumption anywhere underneath makes the claim above it `assumed` rather than `holds`, all the way to the root. CI fails on a claim with nothing under it, an evidence finding that was never sealed, a digest that no longer matches its seal, a cycle, or an exhaustion that does not cover the universe it declared. |
+| **policymeta.py** | A permission pipeline whose *combinator* nobody checked. The pipeline is modelled as data — each stage's declared outcomes, reason codes and ordering laws — and 13 meta-properties are verified against the real `PolicyPipeline` by enumeration: **deny-dominance** over all `4**7` outcome vectors, **ask-is-not-final**, **no-silent-widen** over every vector *and every subset*, **stage-reorder-safety** over every permutation, **crash-fails-closed** from every position. The specification is written as a rule, separately from the code that walks and short-circuits; proving the two agree is the content. Adding a stage with no model fails the build by name. |
+| **faultcatalogue.py** | A typed refusal nothing has ever made fire. For every code the platform can refuse with — across the error taxonomy, the policy pipeline, envelope violations, release reasons and assurance defects — a deterministic scenario provokes exactly that thing and reads back which code came out. 43 of 44 are provoked; the 44th is **declared unreachable with a written reason**, its scenario still runs, and reaching it is its own defect. An uncovered class is a typed defect, not a warning. |
+| **historicaudit.py** | Answering "was that release compliant?" with today's rules. A signed **ruleset bundle** snapshots the rule data a decision depends on and is sealed to the log, and a decision is replayed against the newest bundle sealed *at or before* it. `ToolPolicy` now seals the facts a decision was made from, projected to the arguments a stage actually reads. **Replay never falls back to current rules** — no bundle, an unverifiable one, missing facts and a vanished stage are each typed verdicts, and `complete` is reported apart from `ok` so "12 of 12 agree" cannot hide 400 skipped. |
+| **assuranceboard.py** | A dashboard number nobody sealed. **A figure that cannot name the sealed event it came from is not displayed as a figure** — it renders as `unknown`, with the reason. `collect()` reads the log and nothing else; running the checks is a separate verb. Ten cells, four states, and `unknown` outranks `attention` in the attention list: a failing check has a number and an owner, an unmeasured surface has neither. |
+| **threatpins.py** | A documented limit drifting in silence. The eight open risks — shell deny-list, no process sandbox, ~34% rule coverage, the scripted-turn gate, abandoned timeouts, unmeasurable envelopes, unsealed allows, unreachable refusals — are each *measured* and compared with the committed `threat-model.json`. A change in **either** direction needs `--record <who> <why>`, because a document that overstates a limit misleads as much as one that understates it. Same exposure count with different contents is a widening too. |
+
+```bash
+python -m fullagent.assurance --check          # the argument, node by node
+python -m fullagent.policymeta --check         # 13 meta-properties
+python -m fullagent.faultcatalogue --check     # provoke every typed refusal
+python -m fullagent.threatpins --check         # the documented limits
+python -m fullagent.assuranceboard --check     # where everything stands
+python -m fullagent.assuranceboard --query faults   # one cell, as JSON
+```
+
+The first four are steps in `./run-checks.sh`. The regression gate now
+fingerprints **eleven** governed surfaces: the policy metamodel, the
+failure catalogue and the threat model joined the eight that were there,
+so widening a stage's declared outcomes, dropping a counterfactual, or
+moving a documented limit is a rule change that needs a named
+re-recording behind it.
+
+Two real defects surfaced while building this layer. `historicaudit`
+found `int(getattr(ev, "seq", -1) or -1)` — seq 0 is falsy, so the first
+event in a log reported -1, which meant the **first ruleset bundle ever
+recorded governed nothing** and every decision after it read as
+ungoverned. And the dashboard's `refresh()` turned the runbook suite red
+one run in three: the timeout injector busy-waited a whole core for five
+seconds, long enough to push a *later* runbook's ordinary step past its
+0.25s timeout. Green in isolation, red when anything ran first.
+
+The honest reading, which the assurance case states rather than hides:
+the shipped case's **root is `assumed`, not `holds`**, and it names the
+assumptions it rests on — token generation happens outside this process,
+so no layer here can make a model follow a prompt, and about two thirds
+of the prompt's rules are advisory with nothing checking them.
+
 ## Security model
 
 The short version: **a call that violates the prompt or the machine's
@@ -1067,12 +1114,32 @@ model obey a prompt; token generation happens elsewhere.
   rewrite the log; they cannot rewrite it without verification failing.
 
 Known limits, stated because a security section that lists only strengths
-is marketing: the shell is governed by a **deny-list**, so a destructive
-command nobody wrote a pattern for is allowed — the capability check, the
-ceilings and the approval hook are the layers standing behind it. The
-policy layer refuses calls; it does not sandbox the process, so a tool
-runs with the agent's own privileges. A tool that overruns its timeout is
-abandoned, not killed.
+is marketing — and, since Directive 5, **measured** rather than only
+written down. Each of these is a pin in the committed `threat-model.json`,
+so any change to it in either direction is a named decision rather than
+silent drift:
+
+- The shell is governed by a **deny-list**, so a destructive command
+  nobody wrote a pattern for is allowed. `threatpins` measures this
+  against a 16-command probe corpus and records the **9 it misses**. The
+  capability check, the ceilings and the approval hook are the layers
+  standing behind it.
+- The policy layer refuses calls; it **does not sandbox the process**, so
+  a tool runs with the agent's own privileges. The pin demonstrates this
+  rather than asserting it: it has the policy refuse a command, then
+  writes outside the declared roots and spawns a process from the same
+  process, and records that nothing stopped either.
+- A tool that overruns its timeout is **abandoned, not killed** — the pin
+  confirms the worker thread is still running after the call returns
+  `E_TIMEOUT`.
+- About **a third of the prompt's rules** compile to machine-checkable
+  predicates (10 of 29 for the workspace prompt). The rest are advisory
+  and no layer here checks them.
+- **11 of 17 envelopes are unmeasurable** — `executes` and `egress` are
+  declared and reasoned about, never observed — and an unmeasurable
+  envelope never blocks a call.
+- The policy seals refusals and questions, **not permissions**, so a past
+  allow is not in the record to re-check later.
 
 To report a security problem, open an issue with the steps to reproduce.
 

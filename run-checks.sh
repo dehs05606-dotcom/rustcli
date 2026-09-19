@@ -52,8 +52,10 @@ step "invariants" "$PY" -m fullagent.invariants --check
 #    version bump and a migration, or it does not merge.
 step "contract governance" "$PY" -m fullagent.governance --gate
 
-# 8. The regression gate: the prompt, clauses, policy pipeline, recovery
-#    playbooks and contract lock are fingerprinted, and the two-armed
+# 8. The regression gate: eleven governed surfaces are fingerprinted —
+#    the prompt, clauses, policy pipeline and its metamodel, recovery
+#    playbooks, envelopes, verification floors, the contract lock, the
+#    failure catalogue and the threat model — and the two-armed
 #    adherence benchmark has to still hold AND still catch. A rule change
 #    with no benchmark behind it fails here.
 step "regression gate" "$PY" -m fullagent.regressiongate --check
@@ -66,6 +68,26 @@ step "behavioural envelopes" "$PY" -m fullagent.envelopes --check
 #     proving each recovery playbook still does what it says. A failing
 #     runbook is a defect, never a flake — there is no retry here.
 step "recovery runbooks" "$PY" -m fullagent.runbook --check
+
+# 11. The policy metamodel: the permission pipeline modelled as data and
+#     its meta-properties proved by enumeration — deny-dominance, no
+#     silent widen, reorder safety. A pipeline change ships with this.
+step "policy metamodel" "$PY" -m fullagent.policymeta --check
+
+# 12. The counterfactual failure catalogue: every typed refusal the
+#     platform can emit is provoked on purpose. A class with no scenario
+#     is a defect, not a warning.
+step "failure catalogue" "$PY" -m fullagent.faultcatalogue --check
+
+# 13. The assurance case: every compliance claim resolved to sealed
+#     evidence or to an assumption stated in the open. A claim with
+#     nothing under it fails here.
+step "assurance case" "$PY" -m fullagent.assurance --check
+
+# 14. The threat model: the documented open risks, measured and compared
+#     with the committed posture. A change in either direction needs a
+#     named person to re-record it.
+step "threat model" "$PY" -m fullagent.threatpins --check
 
 step "tool contracts" "$PY" -m fullagent.toolcontract
 step "dispatch core" "$PY" -m fullagent.dispatch

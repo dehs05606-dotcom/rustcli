@@ -305,10 +305,43 @@ class ToolPolicy:
     def evaluate(self, tool_name: str, args: dict | None = None) -> Decision:
         """Decide one tool call. Pure -- it records, it never executes."""
         detailed = self.evaluate_detailed(tool_name, args)
+        # Only build the replay facts for a decision that will be sealed.
+        # An allow is not recorded, and every permitted call is on the hot
+        # path.
+        facts = (self.replayable_facts(tool_name, args)
+                 if detailed.outcome != ALLOW else None)
         return self._seal(Decision(
             detailed.outcome, tool_name, detailed.reason, self.role.name,
             capability=detailed.capability, rule=detailed.rule,
-            rationale=detailed.rationale))
+            rationale=detailed.rationale), facts)
+
+    def replayable_facts(self, tool_name: str,
+                         args: dict | None = None) -> dict:
+        """The inputs this decision actually depended on, and only those.
+
+        Sealed alongside the verdict so a past decision can be re-run
+        against the rules that were in force when it was made. Without
+        this the record says what was decided and not what it was decided
+        *from*, and re-checking it later means re-deciding it under
+        today's rules -- which answers a different question and answers
+        it silently.
+
+        The argument projection is deliberate: only the keys a policy
+        stage reads (path arguments, the command, the URL) are kept. A
+        whole argument dict would put file contents and prompt text in
+        the audit log forever, and none of it took part in the decision.
+        """
+        args = dict(args or {})
+        keys = set(PATH_ARGS.get(tool_name, ())) | {"command", "url"}
+        return {
+            "tool": tool_name,
+            "args": {k: v for k, v in args.items() if k in keys},
+            "role": self.role.name,
+            "capabilities": sorted(self.capabilities_of(tool_name)),
+            "roots": list(self.roots),
+            "counts": {tool_name: self.counts.get(tool_name, 0)},
+            "known": tool_name in self.manifest,
+        }
 
     def evaluate_detailed(self, tool_name: str, args: dict | None = None):
         """The same decision with every stage's rationale attached.
@@ -332,11 +365,14 @@ class ToolPolicy:
         """Count a call that actually ran — what the ceilings measure."""
         self.counts[tool_name] = self.counts.get(tool_name, 0) + 1
 
-    def _seal(self, decision: Decision) -> Decision:
+    def _seal(self, decision: Decision,
+              facts: dict | None = None) -> Decision:
         if self.log is not None and decision.outcome != ALLOW:
             try:
-                self.log.append("policy.decision", decision.to_dict(),
-                                actor="kernel")
+                payload = decision.to_dict()
+                if facts is not None:
+                    payload["request"] = facts
+                self.log.append("policy.decision", payload, actor="kernel")
             except Exception:
                 pass
         return decision

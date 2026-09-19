@@ -132,12 +132,18 @@ def _returns(text: str) -> Callable[..., str]:
 
 def _hangs() -> Callable[..., str]:
     def handler(**_kw) -> str:
-        # Busy-waits rather than sleeping: the dispatcher abandons the
-        # thread at its timeout either way, and a sleep in a test suite
-        # is a cost every run pays for nothing.
+        # Sleeps rather than busy-waiting. The dispatcher abandons this
+        # thread at its own timeout either way, so the wait costs the run
+        # nothing -- but an abandoned thread that spins keeps a core at
+        # 100% for as long as it runs, and everything dispatched behind
+        # it inherits that. This scenario used to spin for five seconds,
+        # which was long enough to push a *later* runbook's ordinary step
+        # past its 0.25s timeout: a green suite in isolation and one
+        # failure in ten when something else ran first. Sleeping is free
+        # for the run and does not starve what comes after it.
         deadline = time.time() + 5.0
         while time.time() < deadline:
-            pass
+            time.sleep(0.01)
         return "never returned in time"
     return handler
 

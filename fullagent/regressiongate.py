@@ -265,6 +265,47 @@ class Fingerprint:
         return "\n".join(lines)
 
 
+def metamodel_digest() -> str:
+    """A digest over the policy pipeline *as modelled and proved*.
+
+    `pipeline_digest` already covers the stages and the roles. This
+    covers the metamodel on top: what each stage is declared to be able
+    to emit, the ordering laws, and the set of meta-properties proved
+    over them. Widening a stage's declared outcomes is a rule change that
+    the stage list alone cannot see.
+    """
+    try:
+        from .policymeta import metamodel_digest as _digest
+        return _digest()
+    except Exception:
+        return ""
+
+
+def catalogue_digest() -> str:
+    """A digest over the surveyed failure classes and what covers them.
+
+    Dropping a counterfactual, or declaring a class unreachable, changes
+    what the platform has evidence for. Governing it here means that
+    decision arrives as a recorded baseline change with a name on it.
+    """
+    try:
+        from .faultcatalogue import catalogue_digest as _digest
+        return _digest()
+    except Exception:
+        return ""
+
+
+def threatmodel_digest(root: Path | None = None) -> str:
+    """A digest over the committed threat model, or '' when there is none."""
+    try:
+        from .threatpins import POSTURE_NAME, read_posture
+        pins = read_posture((root or Path.cwd()) / POSTURE_NAME)
+        return _sha({k: v.digest for k, v in sorted(pins.items())}) \
+            if pins else ""
+    except Exception:
+        return ""
+
+
 def fingerprint(constitution=None, clauses: tuple[Clause, ...] = CLAUSES,
                 prompt_text: str = "", root: Path | None = None
                 ) -> Fingerprint:
@@ -279,6 +320,9 @@ def fingerprint(constitution=None, clauses: tuple[Clause, ...] = CLAUSES,
         "envelopes": envelope_digest(),
         "verification": budget_digest(),
         "contracts": contract_digest(root),
+        "policy-metamodel": metamodel_digest(),
+        "failure-catalogue": catalogue_digest(),
+        "threat-model": threatmodel_digest(root),
     }
     return Fingerprint(surfaces)
 
@@ -880,9 +924,19 @@ if __name__ == "__main__":  # pragma: no cover
 
     # --- fingerprinting ----------------------------------------------
     fp = fingerprint(constitution, prompt_text=PROMPT, root=work)
+    # The surface list is pinned deliberately: a new governed surface
+    # has to be added here on purpose, and one that silently disappears
+    # stops governing anything while the gate keeps reporting PASS.
     assert set(fp.surfaces) == {"prompt", "constitution", "clauses",
                                 "policy-pipeline", "recovery", "envelopes",
-                                "verification", "contracts"}
+                                "verification", "contracts",
+                                "policy-metamodel", "failure-catalogue",
+                                "threat-model"}, sorted(fp.surfaces)
+    # Each of the three newest must actually carry a digest. An empty
+    # one is a surface that is listed and governs nothing, which is the
+    # worse failure of the two because it still reads as covered.
+    for surface in ("policy-metamodel", "failure-catalogue"):
+        assert fp.surfaces[surface], f"{surface} fingerprints to nothing"
     assert fp.changed_from(None) == tuple(sorted(fp.surfaces)), \
         "with nothing to compare against, everything counts as changed"
     same = fingerprint(constitution, prompt_text=PROMPT, root=work)

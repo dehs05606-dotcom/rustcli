@@ -867,3 +867,210 @@ errors by code. `format_status()` prints them.
 - The runbooks prove the playbooks against *injected* failures. A
   failure mode nobody wrote an injector for is still untested, which is
   why `D_UNCOVERED` is a defect rather than a warning.
+
+---
+
+## The assurance layer
+
+The layers below answer "is this call allowed", "did it do what it said",
+"can we explain it afterwards". This one answers a different question:
+**what does this repo actually claim about itself, and what is each claim
+standing on.** Six modules, one argument.
+
+### `assurance.py` — the compositional assurance case
+
+Every compliance claim, assembled into a machine-checkable argument tree:
+a claim is supported by an inference, an inference combines evidence,
+sub-claims and assumptions, and evidence is a function that runs and is
+sealed to the log as it runs.
+
+Three node kinds carry the whole design:
+
+- **Evidence** has a producer. It cannot assert; it has to go and look.
+- **Assumption** is a node, not a footnote. An assumption anywhere under
+  a claim makes the whole claim `assumed` rather than `holds`, all the
+  way to the root — which is why the shipped case's root is `assumed`
+  and says, in the open, that token generation happens outside this
+  process and that two thirds of the prompt's rules are advisory.
+- **Inference** is `all-of`, `any-of`, or `exhaustion`. An exhaustion
+  declares the universe it covers, and a member nobody covers is a
+  defect (`A_UNCOVERED`) — the same rule that stops a coverage argument
+  from covering whatever happens to be there.
+
+Nine defect kinds, each with a remedy. A claim with nothing under it
+(`A_UNSUPPORTED`), an evidence node whose finding was never sealed
+(`A_UNSEALED`), a digest that no longer matches the seal
+(`A_STALE_SEAL`), a cycle, a dangling child, an unreachable node. CI
+fails on any of them, which is what turns "compliant" from a test count
+into a proof somebody can navigate.
+
+### `policymeta.py` — the policy pipeline as data
+
+`policypipeline.py` makes a decision; its self-test checks a handful of
+calls. That tests the *stages*. The **combinator** — the small amount of
+code that decides what a list of stage answers adds up to — is where the
+interesting mistakes live, because it is the only part whose behaviour
+depends on every stage at once.
+
+So the pipeline is modelled as data: each stage's declared outcomes and
+reason codes, and the ordering laws the shipped order is meant to
+satisfy. Then thirteen meta-properties are verified against the real
+`PolicyPipeline`, driven by scripted stages that emit a chosen answer:
+
+- **deny-dominance** — a deny anywhere wins, over all `4**7` outcome
+  vectors.
+- **ask-is-not-final** — a deny after an ask still wins, so nobody is
+  asked to approve a call a later stage refuses. This was a real bug in
+  the pre-pipeline `evaluate()`.
+- **no-silent-widen** — over every vector *and every subset of it*:
+  adding a stage cannot permit what a shorter pipeline refused.
+- **stage-reorder-safety** — over every vector and every permutation:
+  the outcome does not depend on stage order, so the ordering comment is
+  a policy statement and not a load-bearing correctness requirement.
+- **crash-fails-closed** — a stage that raises denies, from any position.
+- plus the audit trail's shape, the deciding stage's soundness, and five
+  properties about the real stages.
+
+Two rules make it more than a restatement of the code. The
+**specification is written separately**: `spec_outcome()` says what a
+vector means as a rule, `decide()` computes it by walking and
+short-circuiting, and proving they agree is the content. And the **model
+is falsifiable**: `P_MODEL_FAITHFUL` runs the real stages over a corpus
+and fails if one emits an outcome or code its model does not declare,
+while `P_MODELLED` fails if the pipeline grows a stage with no model.
+Adding a stage and nothing else fails the build, by name.
+
+Ten properties are `proved` (exhaustive over a declared finite universe)
+and three `checked` (sampled over a corpus). The report counts them
+separately and never adds them.
+
+### `faultcatalogue.py` — the counterfactual failure catalogue
+
+`runbook.py` proves the recovery playbooks for the nine error codes. The
+rest of the platform refuses things too, and each refusal has a typed
+code that is a promise something specific gets caught. A code can sit in
+a dict with a well-worded explanation for a year while the branch that
+emits it has been dead since a refactor, and every test stays green:
+tests check that *good* input passes.
+
+So for every typed refusal, a counterfactual — a deterministic scenario
+that makes exactly that thing go wrong and reads back which code came
+out. Five surveyed surfaces, each declaring its universe by reading the
+owning module's own constants: the error taxonomy (9), the policy
+pipeline's reason codes (10), envelope violation kinds (6), release gate
+reasons (10), assurance defects (9). 43 of the 44 are provoked.
+
+The 44th is the interesting one. **Unreachable is a verdict, and it is
+falsifiable.** `R_TAMPERED` cannot be provoked through `build_release`,
+which signs and verifies the provenance graph inside one call; the branch
+guards a future caller that hands in a graph signed elsewhere. It is
+declared in `UNREACHABLE` *with that reason*, the scenario still runs,
+and if the code ever does come out, `C_REACHED_THE_UNREACHABLE` says the
+declaration went stale. A claim that something cannot happen is worth
+exactly as much as the attempt to make it happen.
+
+An uncovered class is a typed defect (`C_UNCOVERED`), not a warning —
+`runbook.D_UNCOVERED` extended from nine codes to every surveyed surface.
+
+### `historicaudit.py` — reproducible historical audit
+
+"Was that release compliant?" gets asked months later, and the tempting
+way to answer it is to run today's checks over the old record. That
+answers *would we decide this the same way now* — a different question,
+answered without saying so.
+
+A **ruleset bundle** is a content-addressed, HMAC-signed snapshot of the
+rule data a decision depends on: stage order, roles with their ceilings
+and roots, the capability manifest, the destructive-command pattern, the
+path-argument map. It is sealed to the log, which is what gives it a
+position in time. A decision's *governing* bundle is the newest one
+sealed at or before it — strictly at-or-before, because a rule written on
+Tuesday did not govern Monday.
+
+`ToolPolicy` now seals the facts a decision was made from, projected to
+the arguments a stage actually reads (path arguments, the command, the
+URL). A whole argument dict would put file contents in the audit log
+forever and none of it took part in the decision.
+
+**Replay never falls back to current rules.** No bundle, an unverifiable
+bundle, missing facts, a stage that no longer exists — each is a typed
+verdict (`V_NO_RULESET`, `V_TAMPERED`, `V_UNREPLAYABLE`, `V_STAGE_GONE`)
+and the decision is left unjudged. `complete` is reported apart from
+`ok`, because "12 of 12 agree" while 400 were skipped is exactly the
+summary this exists to prevent. `V_DIFFERS` — the same request under the
+same rules decided differently today — is a regression in the decision
+path and the one verdict that fails a build.
+
+### `assuranceboard.py` — the headless dashboard
+
+A dashboard is where a compliance stack goes to start lying: not by
+inventing numbers but by rendering them. A cell that recomputes on view
+shows a figure nobody sealed; a cell with no data shows a reassuring
+zero; a percentage turns "three failure classes have never been
+exercised" into "97%".
+
+One rule, and the module is built around enforcing it: **a number that
+cannot name the sealed event it came from is not displayed as a number.**
+`collect()` reads the event log and nothing else. Running the checks is a
+separate verb (`refresh()`), it seals what it finds, and only then can the
+board show it. Merging the two is the convenience that makes a dashboard
+untrustworthy — a view that runs what it displays can always show
+something, so "never measured" stops being a state anyone sees.
+
+Ten cells, four states. `unknown` outranks `attention` in the attention
+list, because a failing check has a number and an owner and an unmeasured
+surface has neither. `stale` is the third: a green figure taken against a
+rule set that has since changed is worse than no figure, because it looks
+current.
+
+### `threatpins.py` — threat-model-pinned tests
+
+The documented limits — the shell deny-list, no process sandbox, ~34%
+rule coverage, the scripted-turn gate — were sentences in this file and
+the README with nothing checking them. A documented limit drifts in both
+directions and both are bad: quietly wider makes the honest part of the
+system the wrong part; quietly narrower leaves every reader told an
+old, worse story.
+
+So each risk gets a **pin**: a measurement of the behaviour it is about,
+recorded in the committed `threat-model.json` and compared every run.
+Eight risks, each with an `exposure` that has a direction and `facts` a
+person can act on. The shell pin measures a 16-command probe corpus and
+records which 9 the deny-list misses. The sandbox pin asks the policy to
+refuse a command, then writes outside the roots and spawns a process from
+the same process — and records that nothing stopped it. The coverage pin
+compiles the workspace prompt and reports 10 of 29 rules predicated.
+
+A change in either direction is a typed verdict that needs
+`--record <who> <why>`; both are required and both end up in the
+committed file, so the decision arrives in review as a diff with a name
+on it. A narrowing needs a decision just as a widening does, because a
+document that overstates a limit misleads exactly as much as one that
+understates it. Same count with different contents is a widening too —
+a deny-list that stopped catching one command and started catching
+another is a change to the threat model even though the number held.
+
+### What this layer does not do
+
+- An assurance case proves its structure, not its claims. Every claim
+  resolves to evidence or to a stated assumption; whether those
+  assumptions are acceptable is a human judgement and the case is
+  written so a reader gets the assumption in full rather than a tick.
+- The metamodel proves properties of the combinator and of the stages'
+  declarations. It does not verify a stage's own logic — `PathStage`
+  resolving a symlink correctly is `policypipeline`'s own test, not a
+  meta-property.
+- A ruleset bundle stores rule *data*, not rule *code*. A stage whose
+  implementation changed under the same name replays with today's
+  behaviour and no verdict marks it. `REPLAY_LIMITS` carries this in
+  every report, not only here.
+- The policy seals refusals and questions, not permissions. A past
+  *allow* is not in the record to re-check.
+- The fault catalogue proves each typed refusal can fire. It does not
+  prove the refusal is the *right* one, and it says nothing about
+  failures nobody has thought of — a surveyed surface is one somebody
+  chose to survey.
+- The board is a function of the log. An empty log reads as ten
+  unmeasured cells, which is the honest answer and not a failing one.
+- A held pin means the exposure is what it was yesterday. It is not an
+  assertion that yesterday's exposure was acceptable.
