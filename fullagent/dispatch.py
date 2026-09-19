@@ -84,6 +84,11 @@ class ToolResult:
     trace: TraceContext = field(default_factory=TraceContext)
     approved: bool | None = None
     migrated: str = ""      # the shim that carried an older caller across
+    # What the behavioural envelope observed, and whether it was clean.
+    # `None` means no envelope checker ran, which is not the same as
+    # clean and is sealed differently so a later reading can tell.
+    effects: tuple[str, ...] | None = None
+    envelope_ok: bool | None = None
 
     @property
     def trace_id(self) -> str:
@@ -108,6 +113,9 @@ class ToolResult:
              "duration": round(self.duration, 4), "approved": self.approved}
         if self.migrated:
             d["migrated"] = self.migrated
+        if self.effects is not None:
+            d["effects"] = list(self.effects)
+            d["envelope_ok"] = self.envelope_ok
         d.update(self.trace.to_dict())
         if self.error is not None:
             d["error"] = self.error.to_dict()
@@ -193,10 +201,16 @@ class Dispatcher:
     def __init__(self, policy: ToolPolicy | None = None, log=None,
                  approve: Callable[[ToolContract, dict], bool] | None = None,
                  default_deny_approval: bool = True,
-                 migrate: Callable[[str, dict], tuple[dict, str]] | None = None):
+                 migrate: Callable[[str, dict], tuple[dict, str]] | None = None,
+                 envelope=None):
         self.policy = policy
         self.log = log
         self.approve = approve
+        # The behavioural envelope checker, if one is wired. It is a
+        # plain object with before()/after() rather than an import so the
+        # call path does not have to know what an effect is -- the same
+        # reasoning as `migrate` above.
+        self.envelope = envelope
         # An optional shim that carries arguments written against an older
         # contract into the current shape, applied before validation. It is
         # a plain callable rather than a governance object on purpose: the
@@ -295,11 +309,18 @@ class Dispatcher:
         def work() -> None:
             try:
                 box["value"] = handler(**args)
-            except Exception as exc:
-                # Nothing escapes a tool boundary. A caller that had to
-                # wrap every call would eventually forget one. The code
-                # comes from the taxonomy's own classifier, so a dropped
-                # connection is retryable upstream rather than a defect.
+            except BaseException as exc:            # noqa: BLE001
+                # Nothing escapes a tool boundary -- and `Exception` is
+                # not the boundary. A handler raising KeyboardInterrupt
+                # or SystemExit used to kill the worker thread silently,
+                # leaving neither a value nor an error, so the call was
+                # reported as a contract defect instead of the
+                # cancellation it was. Catching BaseException here is
+                # safe because this is never the main thread: an
+                # interrupt delivered to the process is not routed here.
+                # The code comes from the taxonomy's own classifier, so a
+                # dropped connection is retryable upstream rather than a
+                # defect, and a cancellation is a cancellation.
                 box["error"] = ToolError(
                     classify(exc), f"{type(exc).__name__}: {exc}", tool=name)
 
@@ -393,6 +414,12 @@ class Dispatcher:
                     duration=time.time() - started))
 
         handler = self.handlers[name]
+        observation = None
+        if self.envelope is not None:
+            try:
+                observation = self.envelope.before(name, args)
+            except Exception:
+                observation = None   # a broken checker never blocks a call
         # Only a call that can be safely repeated is ever repeated.
         repeatable = contract.idempotency == IDEMPOTENT
         attempt = 0
@@ -423,13 +450,39 @@ class Dispatcher:
                                   f"which its contract does not allow",
                                   tool=name, trace_id=ctx.trace_id)
 
+        effects: tuple[str, ...] | None = None
+        envelope_ok: bool | None = None
+        if self.envelope is not None:
+            try:
+                verdict = self.envelope.after(name, args, error is None,
+                                              observation)
+                effects = tuple(sorted(verdict.observed))
+                envelope_ok = verdict.ok
+                # A call that did something its envelope forbids, or
+                # reported a success it did not produce, did not do what
+                # it said. That is a defect in the tool, not a retryable
+                # condition, so it carries the taxonomy's code for one.
+                if error is None and verdict.blocking:
+                    first = verdict.blocking[0]
+                    error = ToolError(
+                        E_INTERNAL,
+                        f"outside its behavioural envelope: {first.detail}",
+                        tool=name,
+                        details={"envelope": [v.to_dict()
+                                              for v in verdict.blocking]})
+            except Exception:
+                # A checker that raises has checked nothing. It must not
+                # be able to fail a call it could not judge.
+                effects, envelope_ok = None, None
+
         if error is not None and not error.trace_id:
             error = ToolError(error.code, error.message, error.tool,
                               error.field, error.details, ctx.trace_id)
         return self._finish(ToolResult(
             name, error is None, value=value if error is None else None,
             error=error, attempts=attempt, approved=approved, trace=ctx,
-            migrated=migrated, duration=time.time() - started))
+            migrated=migrated, effects=effects, envelope_ok=envelope_ok,
+            duration=time.time() - started))
 
     def _finish(self, result: ToolResult) -> ToolResult:
         self.metrics.record(result)

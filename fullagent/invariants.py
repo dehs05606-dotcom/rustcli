@@ -894,12 +894,500 @@ def _constitution_invariants() -> list[Invariant]:
     ]
 
 
+
+def _envelope_invariants() -> list[Invariant]:
+    from . import envelopes as env
+    from .toolcontract import build_contracts
+    from .tools import build_registry
+
+    contracts = build_contracts(build_registry())
+
+    def every_tool_declared() -> Result:
+        found = env.check_declarations(contracts)
+        missing = [v for v in found if v.kind == env.V_NO_ENVELOPE]
+        if missing:
+            return fails("a registered tool has no behavioural envelope",
+                         {"tools": [v.tool for v in missing][:5]})
+        return holds(len(contracts))
+
+    def class_agrees_with_contract() -> Result:
+        for name, contract in sorted(contracts.items()):
+            envelope = env.ENVELOPES.get(name)
+            if envelope is None:
+                continue
+            allowed = env.CONSISTENT_WITH.get(envelope.klass, ())
+            if contract.idempotency not in allowed:
+                return fails("an envelope class contradicts its contract's "
+                             "idempotency",
+                             {"tool": name, "class": envelope.klass,
+                              "idempotency": contract.idempotency})
+        return holds(len(contracts))
+
+    def classes_are_total() -> Result:
+        missing = set(env.CLASSES) - set(env.CONSISTENT_WITH)
+        if missing:
+            return fails("a repetition class maps to no idempotency",
+                         {"classes": sorted(missing)})
+        return holds(len(env.CLASSES))
+
+    def effects_are_declared() -> Result:
+        for name, envelope in sorted(env.ENVELOPES.items()):
+            unknown = set(envelope.effects) - set(env.EFFECTS)
+            if unknown:
+                return fails("an envelope names an effect that does not "
+                             "exist", {"tool": name,
+                                       "effects": sorted(unknown)})
+        return holds(len(env.ENVELOPES))
+
+    def judging_is_total() -> Result:
+        """Every (envelope, outcome, observation) answers without raising."""
+        cases = 0
+        for name, envelope in sorted(env.ENVELOPES.items()):
+            for ok in (True, False):
+                for obs in (None, env.Observation(name, ())):
+                    verdict = env.judge(envelope, name, {}, ok, obs)
+                    cases += 1
+                    if not isinstance(verdict, env.Verdict):
+                        return fails("judge returned something else",
+                                     {"tool": name})
+                    for v in verdict.violations:
+                        if v.kind not in env.KINDS:
+                            return fails("a violation kind that does not "
+                                         "exist", {"kind": v.kind})
+        return holds(cases)
+
+    def unmeasurable_never_violates() -> Result:
+        """A tool this module cannot observe is never blamed by it.
+
+        An envelope with no path arguments has nothing measured, and a
+        check that cannot see anything must not be able to fail a call.
+        """
+        cases = 0
+        for name, envelope in sorted(env.ENVELOPES.items()):
+            if envelope.measurable:
+                continue
+            for ok in (True, False):
+                verdict = env.judge(envelope, name, {}, ok,
+                                    env.Observation(name, ()))
+                cases += 1
+                if verdict.blocking:
+                    return fails("an unmeasurable envelope blocked a call",
+                                 {"tool": name})
+        return holds(cases)
+
+    def missing_envelope_never_blocks() -> Result:
+        verdict = env.judge(None, "unknown", {}, True, None)
+        if verdict.blocking:
+            return fails("a missing declaration blamed the call for it",
+                         {"violations": [v.to_dict()
+                                         for v in verdict.violations]})
+        if verdict.ok:
+            return fails("a missing declaration was reported as clean")
+        return holds(1)
+
+    return [
+        Invariant("every-tool-has-an-envelope", "envelopes", TOTALITY,
+                  "every registered tool declares a behavioural envelope",
+                  every_tool_declared, exhaustive=True),
+        Invariant("envelope-class-matches-contract", "envelopes",
+                  CONSISTENCY,
+                  "an envelope's repetition class agrees with its "
+                  "contract's idempotency",
+                  class_agrees_with_contract, exhaustive=True),
+        Invariant("classes-map-to-idempotency", "envelopes", TOTALITY,
+                  "every repetition class says which idempotencies it "
+                  "allows", classes_are_total, exhaustive=True),
+        Invariant("effects-are-in-the-vocabulary", "envelopes", CLOSURE,
+                  "no envelope names an effect outside the declared set",
+                  effects_are_declared, exhaustive=True),
+        Invariant("judging-is-total", "envelopes", TOTALITY,
+                  "judging answers for every envelope, outcome and "
+                  "observation", judging_is_total, exhaustive=True),
+        Invariant("unmeasurable-never-blocks", "envelopes", POSTCONDITION,
+                  "an envelope with nothing observable never fails a call",
+                  unmeasurable_never_violates, exhaustive=True),
+        Invariant("undeclared-tool-is-not-blamed", "envelopes",
+                  POSTCONDITION,
+                  "a tool with no envelope is reported, not blocked",
+                  missing_envelope_never_blocks, exhaustive=True),
+    ]
+
+
+def _releasegate_invariants() -> list[Invariant]:
+    from . import releasegate as rel
+
+    def release_is_unconstructible() -> Result:
+        try:
+            rel.Release(object(), rel.Range("x"), "d", rel.Evidence(), 0.0)
+        except rel.ReleaseRefused:
+            return holds(1)
+        except Exception as exc:
+            return fails("Release raised the wrong thing",
+                         {"exception": type(exc).__name__})
+        return fails("a Release was constructed outside the gate, which "
+                     "is the one thing this type exists to prevent")
+
+    def every_reason_has_a_remedy() -> Result:
+        for code, pair in sorted(rel.REASONS.items()):
+            what, remedy = pair
+            if not what or not remedy:
+                return fails("a refusal reason does not say what clears it",
+                             {"code": code})
+        return holds(len(rel.REASONS))
+
+    return [
+        Invariant("release-needs-the-gate", "releasegate", PRECONDITION,
+                  "a Release cannot be constructed outside build_release",
+                  release_is_unconstructible, exhaustive=True),
+        Invariant("release-reasons-are-actionable", "releasegate",
+                  TOTALITY,
+                  "every refusal reason says what would clear it",
+                  every_reason_has_a_remedy, exhaustive=True),
+    ]
+
+
+def _calibration_invariants() -> list[Invariant]:
+    from . import calibration as cal
+
+    def loosening_is_never_automatic() -> Result:
+        """No calibration outcome lowers scrutiny without a human.
+
+        Checked over every combination of the inputs `recalibrate` reads,
+        which is the whole space of decisions it can make.
+        """
+        cases = 0
+        for audits in (0, 5, 20, 100):
+            for hold in (0.0, 0.05, 0.3, 0.9):
+                for recent in (0.0, 0.05, 0.3, 0.9):
+                    for windows in (0, 1, 3):
+                        for downgraded in ((), ("lazy",)):
+                            for floor in (2, 3, 4):
+                                c = cal.Calibration(
+                                    audits=audits, windows=windows,
+                                    hold_rate=hold, recent_hold_rate=recent)
+                                c.degeneracies = tuple(
+                                    cal.Degeneracy(cal.D_ALWAYS_PASSES, d,
+                                                   "constant")
+                                    for d in downgraded)
+                                current = cal.Threshold(min_agreeing=floor)
+                                out = cal.recalibrate(c, current)
+                                cases += 1
+                                applied = out.threshold.min_agreeing
+                                if applied < floor:
+                                    return fails(
+                                        "calibration lowered the threshold "
+                                        "by itself",
+                                        {"from": floor, "to": applied,
+                                         "audits": audits})
+                                if out.proposal is not None and \
+                                        out.proposal.in_effect.min_agreeing \
+                                        != floor:
+                                    return fails(
+                                        "an unaccepted proposal changed "
+                                        "the threshold in effect",
+                                        {"from": floor})
+        return holds(cases)
+
+    def degeneracies_are_explained() -> Result:
+        for kind, pair in sorted(cal.DEGENERACIES.items()):
+            what, cost = pair
+            if not what or not cost:
+                return fails("a degeneracy does not explain itself",
+                             {"kind": kind})
+        return holds(len(cal.DEGENERACIES))
+
+    def unsure_is_never_a_downgrade_target() -> Result:
+        """Only a strategy that stopped discriminating loses its pass."""
+        downgrading = {k for k in cal.DEGENERACIES
+                       if cal.Degeneracy(k, "x", "y").downgrades}
+        if cal.D_ALWAYS_FAILS in downgrading:
+            return fails("a strategy that fails everything had a pass "
+                         "downgraded, which it does not have")
+        if not downgrading:
+            return fails("no degeneracy downgrades anything, so the "
+                         "finding has no consequence")
+        return holds(len(cal.DEGENERACIES))
+
+    return [
+        Invariant("loosening-needs-a-human", "calibration", POSTCONDITION,
+                  "calibration may tighten on its own and never loosen",
+                  loosening_is_never_automatic, exhaustive=True),
+        Invariant("degeneracies-explain-themselves", "calibration",
+                  TOTALITY,
+                  "every degeneracy says what it means and what it costs",
+                  degeneracies_are_explained, exhaustive=True),
+        Invariant("downgrade-targets-are-right", "calibration",
+                  CONSISTENCY,
+                  "only a strategy that stopped discriminating loses its "
+                  "pass", unsure_is_never_a_downgrade_target,
+                  exhaustive=True),
+    ]
+
+
+def _invariantloop_invariants() -> list[Invariant]:
+    from . import invariantloop as loop
+
+    class _Gate:
+        def __init__(self, allowed):
+            self.allowed = allowed
+            self.reasons = ()
+
+        def to_dict(self):
+            return {"allowed": self.allowed}
+
+    def _ledger() -> loop.Ledger:
+        led = loop.Ledger()
+        led.observe([loop.Candidate("c1", loop.S_GAP, "provenance",
+                                    CONSISTENCY, "a claim")])
+        return led
+
+    def nothing_adopts_itself() -> Result:
+        cases = 0
+        for who in ("", "somebody"):
+            for gate in (None, _Gate(False), _Gate(True)):
+                led = _ledger()
+                cases += 1
+                try:
+                    led.accept("c1", who, "why", gate)
+                except (ValueError, loop.NotGated):
+                    continue
+                if not who or gate is None or gate.allowed is not True:
+                    return fails("a candidate was adopted without a named "
+                                 "human and a passing gate",
+                                 {"who": who,
+                                  "gate": None if gate is None
+                                  else gate.allowed})
+        return holds(cases)
+
+    def nothing_drops_silently() -> Result:
+        led = _ledger()
+        try:
+            led.reject("c1", "somebody", "")
+        except ValueError:
+            return holds(1)
+        return fails("a candidate was rejected with no reason recorded")
+
+    def decisions_are_final() -> Result:
+        led = _ledger()
+        led.reject("c1", "somebody", "not a real defect")
+        try:
+            led.accept("c1", "somebody else", "changed my mind",
+                       _Gate(True))
+        except ValueError:
+            return holds(1)
+        return fails("a decided candidate was re-decided, erasing the "
+                     "record of who decided it first")
+
+    def ids_are_content_addressed() -> Result:
+        a = loop._ident(loop.S_GAP, "provenance", "the same claim")
+        b = loop._ident(loop.S_GAP, "provenance", "the same claim")
+        c = loop._ident(loop.S_GAP, "provenance", "a different claim")
+        if a != b:
+            return fails("the same claim produced two ids")
+        if a == c:
+            return fails("two different claims collided on one id")
+        return holds(3)
+
+    def sources_are_explained() -> Result:
+        missing = set(loop.SOURCES) - set(loop.SOURCE_MEANING)
+        if missing:
+            return fails("a candidate source explains nothing",
+                         {"sources": sorted(missing)})
+        return holds(len(loop.SOURCES))
+
+    return [
+        Invariant("candidates-need-a-human-and-a-gate", "invariantloop",
+                  PRECONDITION,
+                  "no candidate is adopted without a named human and a "
+                  "passing regression gate", nothing_adopts_itself,
+                  exhaustive=True),
+        Invariant("rejection-needs-a-reason", "invariantloop",
+                  PRECONDITION,
+                  "a candidate cannot be dropped without a recorded reason",
+                  nothing_drops_silently, exhaustive=True),
+        Invariant("decisions-are-final", "invariantloop", POSTCONDITION,
+                  "a decided candidate cannot be quietly re-decided",
+                  decisions_are_final, exhaustive=True),
+        Invariant("candidate-ids-are-content-addressed", "invariantloop",
+                  CONSISTENCY,
+                  "the same evidence always produces the same candidate id",
+                  ids_are_content_addressed, exhaustive=True),
+        Invariant("every-source-is-explained", "invariantloop", TOTALITY,
+                  "every candidate source says what it means",
+                  sources_are_explained, exhaustive=True),
+    ]
+
+
+def _budget_invariants() -> list[Invariant]:
+    from . import budgets as bud
+    from .toolcontract import build_contracts
+    from .tools import build_registry
+
+    contracts = build_contracts(build_registry())
+
+    def floors_are_never_bought_back() -> Result:
+        """No budget, however small, drops a call below its floor.
+
+        Enumerated over every tool and a spread of budgets: the whole
+        point of the module is that this case cannot happen, so it is
+        checked rather than asserted.
+        """
+        planner = bud.BudgetPlanner(contracts)
+        cases = 0
+        for tool in sorted(contracts):
+            for total in (0, 1, 3, 10, 30, 100):
+                decision = planner.plan(tool, bud.Budget(total))
+                cases += 1
+                if decision.refused:
+                    if decision.runs:
+                        return fails("a refused call still ran checks",
+                                     {"tool": tool, "runs":
+                                      list(decision.runs)})
+                    continue
+                if bud.depth_rank(decision.depth) < \
+                        bud.depth_rank(decision.floor):
+                    return fails("a call was verified below its floor",
+                                 {"tool": tool, "budget": total,
+                                  "depth": decision.depth,
+                                  "floor": decision.floor})
+        return holds(cases)
+
+    def depths_are_monotonic() -> Result:
+        for i in range(len(bud.DEPTHS) - 1):
+            a, b = bud.DEPTHS[i], bud.DEPTHS[i + 1]
+            if not set(bud.INCLUDES[a]) <= set(bud.INCLUDES[b]):
+                return fails("a deeper level does not include a shallower "
+                             "one", {"shallower": a, "deeper": b})
+            if bud.COST[a] > bud.COST[b]:
+                return fails("a deeper level costs less",
+                             {"shallower": a, "deeper": b})
+        return holds(len(bud.DEPTHS))
+
+    def every_grade_has_a_floor() -> Result:
+        from .riskgrade import GRADES
+        missing = set(GRADES) - set(bud.FLOOR)
+        if missing:
+            return fails("a risk grade has no minimum depth",
+                         {"grades": sorted(missing)})
+        for grade, floor in bud.FLOOR.items():
+            if floor not in bud.DEPTHS:
+                return fails("a floor names a depth that does not exist",
+                             {"grade": grade, "floor": floor})
+        return holds(len(GRADES))
+
+    def unknown_tool_is_critical() -> Result:
+        planner = bud.BudgetPlanner({})
+        if planner.grade_of("nobody_declared_me") != "critical":
+            return fails("an undeclared tool was graded as anything other "
+                         "than critical; unknown is not safe")
+        return holds(1)
+
+    def every_decision_explains_itself() -> Result:
+        planner = bud.BudgetPlanner(contracts)
+        cases = 0
+        for tool in sorted(contracts):
+            decision = planner.plan(tool, bud.Budget(bud.UNLIMITED))
+            cases += 1
+            if decision.rule not in bud.RULES:
+                return fails("a budget decision cited a rule that does "
+                             "not exist", {"tool": tool,
+                                           "rule": decision.rule})
+            if not decision.to_dict()["why"]:
+                return fails("a budget decision gave no reason",
+                             {"tool": tool})
+        return holds(cases)
+
+    return [
+        Invariant("floor-is-never-bought-back", "budgets", POSTCONDITION,
+                  "no budget drops a call below its risk grade's floor",
+                  floors_are_never_bought_back, exhaustive=True),
+        Invariant("depths-are-monotonic", "budgets", CONSISTENCY,
+                  "a deeper level includes everything a shallower one "
+                  "runs and costs at least as much", depths_are_monotonic,
+                  exhaustive=True),
+        Invariant("every-grade-has-a-floor", "budgets", TOTALITY,
+                  "every risk grade names a minimum verification depth",
+                  every_grade_has_a_floor, exhaustive=True),
+        Invariant("unknown-tool-is-critical", "budgets", POSTCONDITION,
+                  "a tool with no contract is graded critical, not safe",
+                  unknown_tool_is_critical, exhaustive=True),
+        Invariant("budget-decisions-are-auditable", "budgets", TOTALITY,
+                  "every budget decision names a rule that exists and "
+                  "gives a reason", every_decision_explains_itself,
+                  exhaustive=True),
+    ]
+
+
+def _runbook_invariants() -> list[Invariant]:
+    from . import recovery
+    from . import runbook as rb
+    from .toolcontract import ERROR_CODES
+
+    def every_class_is_injectable() -> Result:
+        missing = set(ERROR_CODES) - set(rb.INJECTORS)
+        extra = set(rb.INJECTORS) - set(ERROR_CODES)
+        if missing or extra:
+            return fails("a failure class has no injector, or an injector "
+                         "no class", {"missing": sorted(missing),
+                                      "extra": sorted(extra)})
+        return holds(len(ERROR_CODES))
+
+    def every_class_is_exercised() -> Result:
+        covered = {b.code for b in rb.RUNBOOKS}
+        missing = set(ERROR_CODES) - covered
+        if missing:
+            return fails("a failure class has no runbook",
+                         {"classes": sorted(missing)})
+        return holds(len(ERROR_CODES))
+
+    def expectations_come_from_the_playbook() -> Result:
+        """No runbook's expectation is a constant it wrote down itself."""
+        for book in rb.RUNBOOKS:
+            expected = book.expected()
+            if expected not in recovery.STRATEGIES:
+                return fails("a runbook expects a strategy that does not "
+                             "exist", {"id": book.id, "expected": expected})
+            if expected == recovery.RETRY:
+                return fails("a runbook expects a retry the dispatcher "
+                             "has already spent", {"id": book.id})
+        return holds(len(rb.RUNBOOKS))
+
+    def defects_explain_themselves() -> Result:
+        for kind, pair in sorted(rb.DEFECTS.items()):
+            what, remedy = pair
+            if not what or not remedy:
+                return fails("a runbook defect does not say what to do "
+                             "about it", {"kind": kind})
+        return holds(len(rb.DEFECTS))
+
+    return [
+        Invariant("every-failure-class-is-injectable", "runbook", TOTALITY,
+                  "every error code has a deterministic injector",
+                  every_class_is_injectable, exhaustive=True),
+        Invariant("every-failure-class-is-exercised", "runbook", TOTALITY,
+                  "every error code has a runbook proving its playbook",
+                  every_class_is_exercised, exhaustive=True),
+        Invariant("expectations-are-read-not-written", "runbook",
+                  CONSISTENCY,
+                  "a runbook's expectation comes from the playbook, not "
+                  "from a constant beside it",
+                  expectations_come_from_the_playbook, exhaustive=True),
+        Invariant("runbook-defects-explain-themselves", "runbook",
+                  TOTALITY,
+                  "every runbook defect says what would fix it",
+                  defects_explain_themselves, exhaustive=True),
+    ]
+
+
 def all_invariants() -> tuple[Invariant, ...]:
     out: list[Invariant] = []
     for builder in (_toolcontract_invariants, _policy_invariants,
                     _recovery_invariants, _orchestrator_invariants,
                     _telemetry_invariants, _manifest_invariants,
-                    _constitution_invariants):
+                    _constitution_invariants, _envelope_invariants,
+                    _releasegate_invariants, _calibration_invariants,
+                    _invariantloop_invariants, _budget_invariants,
+                    _runbook_invariants):
         out.extend(builder())
     return tuple(out)
 

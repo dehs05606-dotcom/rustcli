@@ -204,6 +204,25 @@ def playbook_digest() -> str:
                  for code, p in sorted(PLAYBOOKS.items())})
 
 
+def envelope_digest() -> str:
+    """A digest over the behavioural envelopes.
+
+    An envelope is a rule about what a tool may do, so widening one is a
+    rule change in exactly the sense this gate governs -- and a widened
+    envelope is the quietest possible way to stop catching something.
+    """
+    from .envelopes import ENVELOPES
+    return _sha({name: e.to_dict() for name, e in sorted(ENVELOPES.items())})
+
+
+def budget_digest() -> str:
+    """A digest over the verification floors and what each depth runs."""
+    from .budgets import COST, FLOOR, INCLUDES
+    return _sha({"floor": dict(sorted(FLOOR.items())),
+                 "includes": {k: list(v) for k, v in sorted(INCLUDES.items())},
+                 "cost": dict(sorted(COST.items()))})
+
+
 def contract_digest(root: Path | None = None) -> str:
     """The contract lock's own digest, or '' when there is no lock."""
     from .contractmanifest import LOCK_NAME, read_lock
@@ -257,6 +276,8 @@ def fingerprint(constitution=None, clauses: tuple[Clause, ...] = CLAUSES,
         "clauses": clause_digest(clauses),
         "policy-pipeline": pipeline_digest(),
         "recovery": playbook_digest(),
+        "envelopes": envelope_digest(),
+        "verification": budget_digest(),
         "contracts": contract_digest(root),
     }
     return Fingerprint(surfaces)
@@ -860,7 +881,8 @@ if __name__ == "__main__":  # pragma: no cover
     # --- fingerprinting ----------------------------------------------
     fp = fingerprint(constitution, prompt_text=PROMPT, root=work)
     assert set(fp.surfaces) == {"prompt", "constitution", "clauses",
-                                "policy-pipeline", "recovery", "contracts"}
+                                "policy-pipeline", "recovery", "envelopes",
+                                "verification", "contracts"}
     assert fp.changed_from(None) == tuple(sorted(fp.surfaces)), \
         "with nothing to compare against, everything counts as changed"
     same = fingerprint(constitution, prompt_text=PROMPT, root=work)

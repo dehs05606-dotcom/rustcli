@@ -999,6 +999,42 @@ gate runs scripted turns, so it regression-tests the *rule set*, not the
 model: "do these rules still catch what they used to catch" is a
 question CI can answer, "does the model obey them" is not.
 
+### The provable-behaviour layer
+
+Six more pieces. Where the self-verifying layer makes a bad *change*
+unmergeable, this one makes a bad *behaviour* visible at the moment it
+happens — and makes the two places that matter most (a release, an
+adopted rule) unconstructible without the evidence behind them.
+
+| Module | The state it makes unreachable |
+|---|---|
+| **envelopes.py** | A call that is schema-valid and semantically wrong. Each tool declares the effects it may cause and its repetition class; the paths its arguments name are observed before and after. `write_file` that reports success and leaves no file, or `read_file` that rewrites what it read, becomes a typed `E_INTERNAL` at dispatch. The same judgement is re-derived at seal time from the log alone, so a checker that was buggy or switched off is caught by a second reading. A tool with no envelope is a reported finding, never an assumed-clean one. |
+| **releasegate.py** | Shipping a range nobody can explain afterwards. `Release` has **no public constructor** — it demands a token only `build_release()` holds. Holding one *is* the evidence: no provenance gaps, signatures verify, every consensus hold resolved, every escalation answered, no envelope violation, regression gate passed. Each refusal is typed and says what would clear it. |
+| **calibration.py** | A verifier that quietly stopped working. Six degeneracies — always-passes, always-fails, always-unsure, never-fires, pair-redundant, pair-diverged — are read off the sealed audits. A degenerate strategy's pass is **downgraded to `unsure`**, which can never release anything on its own. Thresholds calibrate from data under one rule: **tightening is automatic, loosening is a proposal** that stays inert until a named human accepts it. |
+| **invariantloop.py** | A gap the system already noticed and nobody wrote down. Provenance gaps, consensus holds, recovery escalations and envelope violations become candidate invariants, content-addressed so the same evidence re-proposes under the same id. **Never auto-adopted** — accepting one needs a named human *and* a passing regression gate. **Never silently dropped** — rejecting needs a reason, and an undecided candidate stays visible forever. |
+| **budgets.py** | A dangerous path checked as cheaply as a safe one. Depth is assigned per call from risk grade, provenance history and the contract's own destructive/outward-facing flags, and every decision is sealed with the inputs it read. **The floor is never bought back**: a clean record buys one level less but never below it, and when even the floor is unaffordable the call is **refused rather than run unverified**. |
+| **runbook.py** | A recovery playbook that stopped being true. 15 deterministic, sandboxed chaos scenarios inject all 9 failure classes into a real dispatcher and orchestrator and check the disposition against what the playbook promises — read *from* the playbook, never hard-coded beside it. A failure is a first-class defect with no retry and no tolerance, and a broken harness is reported apart from a broken playbook. |
+
+```bash
+python -m fullagent.envelopes --check          # declarations vs contracts
+python -m fullagent.envelopes --json           # the envelopes themselves
+python -m fullagent.runbook --check            # inject every failure class
+python -m fullagent.budgets --table            # depth per tool, and why
+python -m fullagent.invariantloop --report     # candidates and their status
+```
+
+`envelopes --check` and `runbook --check` are steps in `./run-checks.sh`.
+Envelopes and verification floors are now **governed surfaces** in the
+regression gate, so widening an envelope is a rule change that needs a
+benchmark behind it — quietly widening one would otherwise be the
+easiest way to stop catching something.
+
+The runbook engine found a real defect on its first complete run:
+`Dispatcher._run_guarded` caught `Exception`, which is not the tool
+boundary. A handler raising `KeyboardInterrupt` or `SystemExit` killed
+the worker thread silently and the call came back misclassified. Fixed,
+with the case pinned in `tests/test_provable_platform.py`.
+
 ## Security model
 
 The short version: **a call that violates the prompt or the machine's

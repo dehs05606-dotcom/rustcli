@@ -590,6 +590,182 @@ is "do these rules still catch what they used to catch", not "does the
 model obey them". The second question is telemetry's, is answered
 against live traffic, and cannot be answered in CI at all.
 
+## Behavioural envelopes (`envelopes.py`)
+
+A JSON Schema decides whether a call is well-formed. It has nothing to
+say about whether the call did what it claimed. `write_file` that
+returns `"wrote 40 bytes"` and leaves no file is schema-valid and a lie.
+
+An **envelope** is the second contract: the effects a tool may cause
+(`reads`, `creates`, `modifies`, `deletes`, `executes`, `egress`), its
+repetition class (`pure`, `repeatable`, `at-most-once`, `irreversible`),
+and which of its arguments name paths. A call outside its envelope is a
+defect even when every field type-checks.
+
+Three properties matter more than the mechanism:
+
+- **Observation is bounded and honest.** Only the paths the call's own
+  arguments name are observed, before and after — a few stats and
+  hashes. A tool that writes somewhere it never named is invisible here,
+  and the module says so rather than implying coverage it does not have.
+  `Envelope.measurable` marks which tools can be checked at all; 6 of 17
+  can, and an unmeasurable envelope can never fail a call.
+- **The check runs twice, independently.** At dispatch against the real
+  filesystem, where a blocking violation turns a "successful" call into
+  a typed `E_INTERNAL`; and at seal time re-derived from what the log
+  recorded, where a checker that was buggy or switched off at dispatch
+  is caught by a second reading of the same evidence. When the two
+  disagree, the report says so rather than preferring either.
+- **A tool with no envelope is reported, never assumed clean.**
+  `V_NO_ENVELOPE` is a finding about the declarations, and it is
+  deliberately non-blocking: a missing declaration is our fault, not the
+  call's.
+
+The repetition class is cross-checked against the contract's
+idempotency, so an envelope claiming `pure` on a non-idempotent tool is
+a build failure rather than a comment nobody reread.
+
+## The release gate (`releasegate.py`)
+
+Every other gate answers "is this allowed?" and can be overruled by
+someone who does not read the answer. This one is built the other way
+round: **`Release` has no public constructor.** It demands a
+module-private token that only `build_release()` holds, so
+`Release(...)` raises everywhere else. Holding a `Release` *is* the
+evidence that the record behind it was complete — not a claim that
+someone checked.
+
+Complete means, precisely: no `Gap` nodes in the provenance for the
+range; the graph verifies under its signing key; every consensus HOLD
+carries a `Resolution`; every orchestrator ESCALATED step has a sealed
+human decision; no envelope violation in range; and the regression
+constitution gate passed. Each failure is a typed reason with what would
+clear it.
+
+It gates on the *record*, not on the code. A range whose provenance is
+complete can still be a bad release; this refuses the ones nobody could
+explain afterwards.
+
+## Calibration (`calibration.py`)
+
+`consensus.py` holds when two strategies disagree. Nothing was watching
+the strategies themselves — and a strategy that has quietly stopped
+working does not throw, it passes everything. A pair where one member
+always passes is really one member, with the reassuring appearance of
+two.
+
+Calibration reads the sealed audits back and names six degeneracies:
+`always-passes`, `always-fails`, `always-unsure`, `never-fires`,
+`pair-redundant`, `pair-diverged`. A degenerate strategy is not
+discarded and not trusted: its `pass` is **downgraded to `unsure`**,
+which by the consensus rule can never release anything on its own.
+`always-fails` deliberately does not downgrade — a strategy that fails
+everything has no pass to downgrade.
+
+Thresholds are calibrated from observed data under one hard rule:
+
+> **Calibration may tighten on its own. Loosening is a proposal.**
+
+Raising scrutiny in response to evidence is safe and automatic. Lowering
+it is a decision about how much risk to accept, so it produces an inert
+`Proposal` that changes nothing until a named human accepts it — the
+same shape `telemetry.py` uses for model routing. An invariant checks
+this exhaustively over every combination of inputs `recalibrate()`
+reads.
+
+## The evolution loop (`invariantloop.py`)
+
+`invariants.py` holds what someone thought to state. The interesting
+claims are the ones nobody thought of, and the system already knows
+where they are: every place it recorded that it could not explain
+something — a provenance `Gap`, a consensus `HOLD`, a recovery
+`ESCALATE`, an envelope violation. Each is the system saying "here is
+something I cannot account for"; a candidate invariant is that sentence
+turned round.
+
+Two rules hold it up:
+
+- **Never auto-adopted.** Accepting a candidate is a rule change, so it
+  requires a named human *and* a passing regression gate — the gate that
+  already refuses a rule change with no benchmark behind it. A system
+  that writes its own rules and adopts them is a system that can quietly
+  lose the rules it started with.
+- **Never silently dropped.** Rejecting needs a reason and a name. A
+  candidate nobody decided stays `proposed` and appears in every report
+  until somebody deals with it. The risk here is not a bad invariant
+  getting in; it is a real one getting quietly binned.
+
+Candidate ids are content-addressed, so the same evidence re-proposes
+under the same id and a rejection is not undone by tomorrow's run.
+
+## Verification budgets (`budgets.py`)
+
+Verification is not free, and spending the same amount on `read_file` as
+on `delete_path` means either the cheap path is slow or the dangerous
+one is under-checked. In practice it is always the second.
+
+Depth (`skip` → `shallow` → `standard` → `deep` → `exhaustive`) is
+assigned per call from the tool's risk grade, its provenance history
+(gaps, envelope violations, escalations), and whether its contract calls
+it destructive or outward-facing. Every `Decision` carries the inputs it
+read, the rule that fired and the depth that came out, and is sealed —
+"why was this only shallow-checked?" has a record rather than a
+reconstruction.
+
+Two rules:
+
+- **The floor is not negotiable.** Each grade has a minimum depth. A
+  budget under pressure buys back time from the cheap end and never from
+  the expensive end. A long clean record is a reason to prefer one level
+  less, never a licence to go under the floor.
+- **An unaffordable floor refuses.** When even the minimum cannot be
+  paid for, the call is refused rather than run unverified. Going fast
+  by skipping the check that would have caught the problem is not going
+  fast.
+
+A tool with no contract grades `critical`: unknown is not safe.
+
+Cost is a declared constant per depth, not a measurement. It ranks and
+budgets; it does not predict seconds, and the module says so.
+
+## The runbook engine (`runbook.py`)
+
+`recovery.py` says what to do about each failure class. Those sentences
+were true when they were written, and nothing was checking that they
+still are, because the only way to find out is to make the failure
+happen.
+
+For each error code there is a **runbook**: a deterministic, sandboxed
+scenario that injects exactly that failure into a real dispatcher and a
+real orchestrator, then checks that the *disposition* is the one the
+playbook promises for that context. 15 scenarios cover all 9 error
+codes, including the contrasting contexts for the codes whose answer
+depends on them (`E_TIMEOUT` on a repeatable call, on a non-repeatable
+one, and with nobody to escalate to).
+
+- **Deterministic, not random.** Every injector fails the same way every
+  time, in a temporary directory, with no network and no sleeps. A test
+  that fails one run in fifty teaches nobody anything and gets muted.
+- **A failing runbook is a defect, not a flake.** No retry, no
+  tolerance. `D_PLAYBOOK_BROKEN` means the playbook no longer describes
+  what happens; `D_HARNESS_BROKEN` means the scenario could not set
+  itself up, reported *separately*, because a harness that cannot run is
+  not a playbook that passed.
+- **Coverage is checked.** `D_UNCOVERED` names any error code with no
+  runbook.
+
+Each runbook's expectation is **read from the playbook** rather than
+written beside it. A runbook that hard-coded its answer would pass
+forever while the playbook changed underneath it, which is precisely the
+failure this module exists to catch.
+
+The engine found a real defect on its first complete run: `_run_guarded`
+caught `Exception`, which is not the tool boundary. A handler raising
+`KeyboardInterrupt` or `SystemExit` killed the worker thread silently,
+leaving neither a value nor an error, so the call was reported as a
+contract defect instead of the cancellation it was. The classifier
+already knew what to call it; nothing was handing it the exception.
+
 ## How this meets the compliance stack
 
 The prompt compliance stack decides *whether an action is allowed by the
@@ -676,3 +852,18 @@ errors by code. `format_status()` prints them.
 - Risk grades are derived from what the log recorded. A tool that has
   never been called has only its declared floor, which is the
   conservative answer and not an informed one.
+- An envelope observes only the paths the call's own arguments name. A
+  tool that writes somewhere it never named is outside what this can
+  see, and 11 of the 17 shipped envelopes have no measurable effect at
+  all — `executes` and `egress` are declared and reasoned about, not
+  measured.
+- The release gate reads the record, not the code. A complete provenance
+  chain is not a good release; it is a release somebody can explain.
+- Calibration measures the audits that were sealed. A strategy that has
+  never run is unmeasured, not reliable, and `never-fires` says so
+  rather than letting a thin sample read as a clean one.
+- Verification cost is a declared constant per depth. It ranks and
+  budgets; it is not a prediction of wall-clock time.
+- The runbooks prove the playbooks against *injected* failures. A
+  failure mode nobody wrote an injector for is still untested, which is
+  why `D_UNCOVERED` is a defect rather than a warning.

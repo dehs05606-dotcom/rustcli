@@ -58,6 +58,15 @@ step "contract governance" "$PY" -m fullagent.governance --gate
 #    with no benchmark behind it fails here.
 step "regression gate" "$PY" -m fullagent.regressiongate --check
 
+# 9. Behavioural envelopes: every tool declares what it may do, and
+#    every declaration agrees with its contract's idempotency.
+step "behavioural envelopes" "$PY" -m fullagent.envelopes --check
+
+# 10. The chaos runbooks: every failure class injected deterministically,
+#     proving each recovery playbook still does what it says. A failing
+#     runbook is a defect, never a flake — there is no retry here.
+step "recovery runbooks" "$PY" -m fullagent.runbook --check
+
 step "tool contracts" "$PY" -m fullagent.toolcontract
 step "dispatch core" "$PY" -m fullagent.dispatch
 step "orchestrator" "$PY" -m fullagent.orchestrator
