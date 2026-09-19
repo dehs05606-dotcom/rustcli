@@ -388,6 +388,8 @@ class Orchestrator:
                             "reason": "approval"})
                 return result
 
+        self._nested_undone: list[str] = []
+        self._nested_stuck: list[str] = []
         failure, completed = self._execute(plan, "", 0, ctx, approve_tool,
                                            index)
 
@@ -404,6 +406,8 @@ class Orchestrator:
                 entry.detail = f"stopped after {failure.path} failed"
 
         undone, stuck = self._rollback(completed, ctx, approve_tool)
+        undone = tuple(self._nested_undone) + undone
+        stuck = tuple(self._nested_stuck) + stuck
         result.rolled_back = undone
         result.irreversible = stuck
         result.escalated = tuple(e.path for e in ledger
@@ -448,8 +452,13 @@ class Orchestrator:
                     completed.append(_Undoable(step, entry, inner_done))
                     continue
                 # The child cleaned up after itself; the parent only needs
-                # to know that this step did not happen.
-                self._rollback(inner_done, ctx, approve_tool)
+                # to know that this step did not happen. What the child
+                # undid still belongs in the run's result -- a rollback
+                # nobody is told about is indistinguishable from none.
+                child_undone, child_stuck = self._rollback(
+                    inner_done, ctx, approve_tool)
+                self._nested_undone.extend(child_undone)
+                self._nested_stuck.extend(child_stuck)
                 entry.status = FAILED
                 entry.detail = f"sub-plan failed at {inner_failure.path}"
                 self._seal("orchestrator.step.done",

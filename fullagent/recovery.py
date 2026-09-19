@@ -153,6 +153,26 @@ def playbook_for(code: str) -> Playbook:
         f"stopping is the only safe reading"))
 
 
+def _reachable(preferred: str, fallback: str, ctx: Context) -> str:
+    """A strategy nobody can carry out is not a strategy.
+
+    Escalating with nobody to ask, or compensating with nothing to
+    compensate with, would be a decision that reads fine in a log and
+    does nothing in the world. Each downgrade is resolved against what
+    the context actually offers, and the last resort is always ABORT --
+    stopping is the one action that is always available.
+    """
+    for choice in (preferred, fallback):
+        if choice == ESCALATE and not ctx.can_ask_human:
+            continue
+        if choice == COMPENSATE and not ctx.has_compensation:
+            continue
+        if choice == RETRY and not ctx.idempotent:
+            continue
+        return choice
+    return ABORT
+
+
 def plan(error: ToolError | None, context: Context | None = None) -> Recovery:
     """Decide what to do about one failure."""
     if error is None:
@@ -164,7 +184,7 @@ def plan(error: ToolError | None, context: Context | None = None) -> Recovery:
     if wanted == RETRY:
         if not ctx.idempotent:
             return Recovery(
-                error.code, ESCALATE,
+                error.code, _reachable(ESCALATE, book.fallback, ctx),
                 "the call is not repeatable, and a failure that was "
                 "abandoned rather than observed may already have landed",
                 book, downgraded_from=RETRY)
@@ -172,12 +192,12 @@ def plan(error: ToolError | None, context: Context | None = None) -> Recovery:
             # The taxonomy is authoritative. A playbook cannot make a
             # final code repeatable.
             return Recovery(
-                error.code, book.fallback,
+                error.code, _reachable(book.fallback, ABORT, ctx),
                 "the taxonomy calls this code final, whatever the playbook "
                 "would prefer", book, downgraded_from=RETRY)
         if not ctx.attempts_left:
             return Recovery(
-                error.code, ESCALATE,
+                error.code, _reachable(ESCALATE, book.fallback, ctx),
                 f"already tried {ctx.attempts} time(s) and the failure "
                 f"persists", book, downgraded_from=RETRY)
         return Recovery(error.code, RETRY, book.rationale, book)
@@ -185,14 +205,14 @@ def plan(error: ToolError | None, context: Context | None = None) -> Recovery:
     if wanted == COMPENSATE:
         if not ctx.has_compensation:
             return Recovery(
-                error.code, ctx.can_ask_human and ESCALATE or book.fallback,
+                error.code, _reachable(ESCALATE, book.fallback, ctx),
                 "nothing was declared that would undo this, so it cannot "
                 "be rolled back", book, downgraded_from=COMPENSATE)
         return Recovery(error.code, COMPENSATE, book.rationale, book)
 
     if wanted == ESCALATE and not ctx.can_ask_human:
         return Recovery(
-            error.code, book.fallback,
+            error.code, _reachable(book.fallback, ABORT, ctx),
             "this needs a human and there is nobody to ask", book,
             downgraded_from=ESCALATE)
 
@@ -241,10 +261,16 @@ if __name__ == "__main__":
     def err(code):
         return ToolError(code, "something went wrong", tool="t")
 
-    repeatable = Context(idempotent=True, max_attempts=3, attempts=1)
-    once = Context(idempotent=False, max_attempts=3, attempts=1)
-    with_undo = Context(has_compensation=True)
+    # Every context that tests an escalation says so: a downgrade only
+    # ever lands on a strategy the context can actually carry out, so a
+    # Context() with nobody to ask can never produce ESCALATE.
+    repeatable = Context(idempotent=True, max_attempts=3, attempts=1,
+                         can_ask_human=True)
+    once = Context(idempotent=False, max_attempts=3, attempts=1,
+                   can_ask_human=True)
+    with_undo = Context(has_compensation=True, can_ask_human=True)
     with_human = Context(can_ask_human=True)
+    alone = Context()          # no undo, nobody to ask, cannot repeat
 
     # --- retry is gated by repeatability, not by hope ------------------
     assert plan(err(E_TIMEOUT), repeatable).strategy == RETRY
@@ -256,29 +282,41 @@ if __name__ == "__main__":
     assert plan(err(E_UPSTREAM), once).strategy == ESCALATE
 
     spent = plan(err(E_UPSTREAM),
-                 Context(idempotent=True, attempts=3, max_attempts=3))
+                 Context(idempotent=True, attempts=3, max_attempts=3,
+                         can_ask_human=True))
     assert spent.strategy == ESCALATE and spent.downgraded_from == RETRY, \
         spent.line()
 
     # --- a validation error is never retried ---------------------------
-    for ctx in (repeatable, once, with_undo, with_human):
+    for ctx in (repeatable, once, with_undo, with_human, alone):
         assert plan(err(E_VALIDATION), ctx).strategy == ABORT
 
     # --- compensation is only a plan when one exists -------------------
     assert plan(err(E_INTERNAL), with_undo).strategy == COMPENSATE
-    bare = plan(err(E_INTERNAL), Context())
+    bare = plan(err(E_INTERNAL), alone)
     assert bare.strategy == ABORT and bare.downgraded_from == COMPENSATE, \
         bare.line()
     asked = plan(err(E_INTERNAL), Context(can_ask_human=True))
     assert asked.strategy == ESCALATE, asked.line()
 
     assert plan(err(E_CONFLICT), with_undo).strategy == COMPENSATE
-    assert plan(err(E_CONFLICT), Context()).strategy == ESCALATE
+    # No compensation and nobody to ask: the playbook would prefer to
+    # escalate and there is no one there, so it stops. This assertion used
+    # to say ESCALATE, which was a decision that read fine in a log and
+    # did nothing in the world; the invariant layer caught it.
+    assert plan(err(E_CONFLICT), alone).strategy == ABORT
+    assert plan(err(E_CONFLICT),
+                Context(can_ask_human=True)).strategy == ESCALATE
+
+    # --- a downgrade never lands on something unreachable --------------
+    for code in PLAYBOOKS:
+        verdict = plan(err(code), alone)      # knows nothing, has nobody
+        assert verdict.strategy == ABORT, (code, verdict.line())
 
     # --- escalation needs somebody to escalate to ----------------------
     assert plan(err(E_PERMISSION), with_human).strategy == ESCALATE
-    alone = plan(err(E_PERMISSION), Context())
-    assert alone.strategy == ABORT and alone.downgraded_from == ESCALATE
+    nobody = plan(err(E_PERMISSION), alone)
+    assert nobody.strategy == ABORT and nobody.downgraded_from == ESCALATE
 
     refused = plan(err(E_PERMISSION),
                    Context(can_ask_human=True, approval_refused=True))
@@ -286,7 +324,7 @@ if __name__ == "__main__":
         "asking again after a refusal is pestering, not escalation"
 
     assert plan(err(E_RESOURCE), with_human).strategy == ESCALATE
-    assert plan(err(E_RESOURCE), Context()).strategy == ABORT
+    assert plan(err(E_RESOURCE), alone).strategy == ABORT
     assert plan(err(E_CANCELLED), with_human).strategy == ABORT
     assert plan(err(E_NOT_FOUND), with_human).strategy == ABORT
 

@@ -1,0 +1,80 @@
+{
+  "catches": {
+    "cited-paths-exist": {
+      "caught": 1,
+      "missed": [],
+      "shown": 1
+    },
+    "failures-surfaced": {
+      "caught": 1,
+      "missed": [],
+      "shown": 1
+    },
+    "read-before-edit": {
+      "caught": 2,
+      "missed": [],
+      "shown": 2
+    },
+    "verify-before-success": {
+      "caught": 1,
+      "missed": [],
+      "shown": 1
+    }
+  },
+  "clause_ids": [
+    "cited-paths-exist",
+    "failures-surfaced",
+    "goal-proof-discipline",
+    "read-before-edit",
+    "verify-before-success"
+  ],
+  "clean_rate": 1.0,
+  "fingerprint": {
+    "root": "8332202b0d540494",
+    "surfaces": {
+      "clauses": "1142af2bd273ff3e",
+      "constitution": "b94bca5b22783b36",
+      "contracts": "9107681a3974ee84",
+      "policy-pipeline": "08030f700b452a37",
+      "prompt": "6d51255b81189681",
+      "recovery": "35d991d90f9d7aea"
+    }
+  },
+  "history": [
+    1.0
+  ],
+  "note": "",
+  "policy_ids": [
+    "goal-mode.a-clause-is-only-proven-when",
+    "goal-mode.each-clause-has-a-predicate-that",
+    "goal-mode.when-the-user-gives-you-a",
+    "make-minimal-correct-changes-prefer-small.be-honest-about-uncertainty-if-you",
+    "make-minimal-correct-changes-prefer-small.make-minimal-correct-changes-prefer-smal",
+    "make-minimal-correct-changes-prefer-small.never-claim-success-without-evidence",
+    "make-minimal-correct-changes-prefer-small.never-fabricate-cite-real-sources-real",
+    "make-minimal-correct-changes-prefer-small.respect-the-user-s-autonomy-ask",
+    "make-minimal-correct-changes-prefer-small.verify-everything-run-tests-check-exit",
+    "output-contract.cite-sources-urls-file-line-when",
+    "output-contract.use-code-blocks-for-code-commands",
+    "parallel-subagents.do-not-contort-a-split-just",
+    "parallel-subagents.give-each-subagent-a-role-researcher",
+    "parallel-subagents.independent-work-should-happen-at-the",
+    "parallel-subagents.never-present-a-partial-finding-as",
+    "parallel-subagents.reach-for-it-whenever-a-job",
+    "parallel-subagents.two-subagents-must-never-be-given",
+    "parallel-subagents.what-it-reports-is-real-but",
+    "parallel-subagents.work-that-must-happen-in-order",
+    "parallel-subagents.you-do-not-need-to-hold",
+    "safety.never-execute-harmful-or-destructive-com",
+    "safety.never-exfiltrate-data-access-unauthorize",
+    "safety.respect-privacy-do-not-read-sensitive",
+    "tool-usage.use-edit_file-for-precise-string-replace",
+    "tool-usage.use-read_file-to-inspect-files-before",
+    "tool-usage.use-run_command-to-execute-builds-tests",
+    "tool-usage.use-search_files-for-regex-based-code",
+    "tool-usage.use-web_fetch-to-read-specific-urls",
+    "understand-first-read-the-codebase-before.never-assume"
+  ],
+  "recorded_by": "directive-3",
+  "score": 1.0
+}

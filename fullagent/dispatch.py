@@ -83,6 +83,7 @@ class ToolResult:
     duration: float = 0.0
     trace: TraceContext = field(default_factory=TraceContext)
     approved: bool | None = None
+    migrated: str = ""      # the shim that carried an older caller across
 
     @property
     def trace_id(self) -> str:
@@ -105,6 +106,8 @@ class ToolResult:
     def to_dict(self) -> dict:
         d = {"tool": self.tool, "ok": self.ok, "attempts": self.attempts,
              "duration": round(self.duration, 4), "approved": self.approved}
+        if self.migrated:
+            d["migrated"] = self.migrated
         d.update(self.trace.to_dict())
         if self.error is not None:
             d["error"] = self.error.to_dict()
@@ -189,10 +192,16 @@ class Dispatcher:
 
     def __init__(self, policy: ToolPolicy | None = None, log=None,
                  approve: Callable[[ToolContract, dict], bool] | None = None,
-                 default_deny_approval: bool = True):
+                 default_deny_approval: bool = True,
+                 migrate: Callable[[str, dict], tuple[dict, str]] | None = None):
         self.policy = policy
         self.log = log
         self.approve = approve
+        # An optional shim that carries arguments written against an older
+        # contract into the current shape, applied before validation. It is
+        # a plain callable rather than a governance object on purpose: the
+        # call path should not have to know what a semantic version is.
+        self.migrate = migrate
         # With no approval hook wired, a destructive or outward-facing
         # call is refused rather than run. The brief calls this
         # default-deny, and it is the only safe reading: a missing hook is
@@ -324,13 +333,24 @@ class Dispatcher:
                     tool=name, trace_id=ctx.trace_id),
                 trace=ctx, duration=time.time() - started))
 
+        migrated = ""
+        if self.migrate is not None:
+            try:
+                args, migrated = self.migrate(name, args)
+            except Exception as exc:
+                # A shim that throws has migrated nothing; the original
+                # arguments go to validation, which will say what is
+                # wrong with them in terms the caller can act on.
+                migrated = f"migration failed: {type(exc).__name__}: {exc}"
+
         bad = contract.validate_input(args)
         if bad is not None:
             return self._finish(ToolResult(
                 name, False, error=ToolError(
                     bad.code, bad.message, tool=name, field=bad.field,
                     trace_id=ctx.trace_id),
-                trace=ctx, duration=time.time() - started))
+                trace=ctx, migrated=migrated,
+                duration=time.time() - started))
 
         needs_approval = contract.needs_approval
         if self.policy is not None:
@@ -343,7 +363,8 @@ class Dispatcher:
                         details={"rule": decision.rule,
                                  "role": decision.role},
                         trace_id=ctx.trace_id),
-                    trace=ctx, duration=time.time() - started))
+                    trace=ctx, migrated=migrated,
+                    duration=time.time() - started))
             if decision.outcome == ASK:
                 needs_approval = True
 
@@ -368,7 +389,8 @@ class Dispatcher:
                                             "outward_facing":
                                                 contract.outward_facing},
                         trace_id=ctx.trace_id),
-                    trace=ctx, duration=time.time() - started))
+                    trace=ctx, migrated=migrated,
+                    duration=time.time() - started))
 
         handler = self.handlers[name]
         # Only a call that can be safely repeated is ever repeated.
@@ -407,7 +429,7 @@ class Dispatcher:
         return self._finish(ToolResult(
             name, error is None, value=value if error is None else None,
             error=error, attempts=attempt, approved=approved, trace=ctx,
-            duration=time.time() - started))
+            migrated=migrated, duration=time.time() - started))
 
     def _finish(self, result: ToolResult) -> ToolResult:
         self.metrics.record(result)

@@ -80,20 +80,33 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
-def entry_for(contract: ToolContract) -> dict:
-    """One tool's line in the manifest, in a stable order."""
+def entry_for(contract: ToolContract, semver: str = "") -> dict:
+    """One tool's line in the manifest, in a stable order.
+
+    `semver` rides alongside the digest rather than inside it. The digest
+    is about behaviour; the version is the label we put on that
+    behaviour. Folding the label into the hash would make every version
+    bump look like a behaviour change, and then nobody could tell the
+    two apart in a diff.
+    """
     payload = contract.to_dict()
     payload.pop("description", None)   # prose changes are not contract changes
     # The error list is a set in everything but type. Sorting it here
     # keeps the digest from moving when somebody reorders a tuple, which
     # would otherwise show up as a contract change in every diff.
     payload["errors"] = sorted(set(payload.get("errors") or ()))
-    return {**payload, "digest": _digest(payload)}
+    entry = {**payload, "digest": _digest(payload)}
+    if semver:
+        entry["semver"] = semver
+    return entry
 
 
-def manifest(contracts: dict[str, ToolContract]) -> dict:
+def manifest(contracts: dict[str, ToolContract],
+             versions: dict[str, str] | None = None) -> dict:
     """The whole set, with a digest that changes when any contract does."""
-    entries = {name: entry_for(contracts[name]) for name in sorted(contracts)}
+    versions = versions or {}
+    entries = {name: entry_for(contracts[name], versions.get(name, ""))
+               for name in sorted(contracts)}
     return {"contract_version": CONTRACT_VERSION,
             "tools": entries,
             "digest": _digest({k: v["digest"] for k, v in entries.items()})}
@@ -354,7 +367,7 @@ def check(registry: dict, root: str | Path = ".",
     root = Path(root)
     lock_path = Path(lock_path) if lock_path else root / LOCK_NAME
     contracts = build_contracts(registry)
-    current = manifest(contracts)
+    current = manifest(contracts, _declared_versions())
     findings: list[Finding] = []
 
     # 1. the schema really does have one source
@@ -433,13 +446,27 @@ def check(registry: dict, root: str | Path = ".",
 # CLI: --write refreshes the lock, --check fails on drift
 # ---------------------------------------------------------------------------
 
+def _declared_versions() -> dict[str, str]:
+    """The per-tool semantic versions, imported late.
+
+    `governance` is built on this module, so importing it at module scope
+    would be a cycle. It is the owner of versions and this is the only
+    place that needs them.
+    """
+    try:
+        from .governance import VERSIONS
+        return dict(VERSIONS)
+    except Exception:
+        return {}
+
+
 def _cli(argv: list[str]) -> int:
     from .tools import build_registry
 
     root = Path(__file__).resolve().parent.parent
     registry = build_registry()
     if "--write" in argv:
-        data = manifest(build_contracts(registry))
+        data = manifest(build_contracts(registry), _declared_versions())
         write_lock(root / LOCK_NAME, data)
         print(f"wrote {LOCK_NAME} — {len(data['tools'])} tools, "
               f"digest {data['digest']}")

@@ -1,16 +1,17 @@
 {
   "contract_version": "1.0",
-  "digest": "17cd49a02e124ef9",
+  "digest": "9107681a3974ee84",
   "tools": {
     "apply_patch": {
       "destructive": true,
-      "digest": "93058dc77b368f4b",
+      "digest": "daa9402e94f98697",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "non_idempotent",
@@ -44,18 +45,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 60.0,
       "version": "1.0"
     },
     "copy_path": {
       "destructive": true,
-      "digest": "60acfc50d8d2e3e0",
+      "digest": "725f778d4ee7098f",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -93,18 +96,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 60.0,
       "version": "1.0"
     },
     "create_directory": {
       "destructive": false,
-      "digest": "3daba59e2e5b11c7",
+      "digest": "18178b6589304bcf",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -137,18 +142,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 60.0,
       "version": "1.0"
     },
     "delete_path": {
       "destructive": true,
-      "digest": "43e589138af8275f",
+      "digest": "8e1be61a45c12bed",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "unsafe",
@@ -181,18 +188,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 60.0,
       "version": "1.0"
     },
     "edit_file": {
       "destructive": true,
-      "digest": "407de583de5417b7",
+      "digest": "3cb079bbc419776f",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "non_idempotent",
@@ -237,18 +246,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 30.0,
       "version": "1.0"
     },
     "file_info": {
       "destructive": false,
-      "digest": "6efe68d6e2adedc8",
+      "digest": "4771c9ff92246eb5",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -281,18 +292,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 20.0,
       "version": "1.0"
     },
     "glob_files": {
       "destructive": false,
-      "digest": "0dedd4f7ccba54f4",
+      "digest": "1d86087518ea7317",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -328,18 +341,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 30.0,
       "version": "1.0"
     },
     "list_dir": {
       "destructive": false,
-      "digest": "35c9bb0936b394f4",
+      "digest": "71eb4ad809aa2bc3",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -369,6 +384,7 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 20.0,
       "version": "1.0"
     },
@@ -416,6 +432,7 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.0.0",
       "timeout_seconds": 300.0,
       "version": "1.0"
     },
@@ -452,18 +469,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.0.0",
       "timeout_seconds": 60.0,
       "version": "1.0"
     },
     "move_path": {
       "destructive": true,
-      "digest": "89d78cdf4255e6a2",
+      "digest": "d1b942e51bb303c0",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "unsafe",
@@ -501,18 +520,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 60.0,
       "version": "1.0"
     },
     "read_file": {
       "destructive": false,
-      "digest": "83962f1840a6e364",
+      "digest": "46c6f31439f2fa22",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -553,6 +574,7 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 20.0,
       "version": "1.0"
     },
@@ -600,18 +622,20 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.0.0",
       "timeout_seconds": 300.0,
       "version": "1.0"
     },
     "search_files": {
       "destructive": false,
-      "digest": "99b6ce1269464383",
+      "digest": "69ac76d9a2bb0e03",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -653,6 +677,7 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 60.0,
       "version": "1.0"
     },
@@ -696,6 +721,7 @@
         ],
         "max_attempts": 3
       },
+      "semver": "1.0.0",
       "timeout_seconds": 30.0,
       "version": "1.0"
     },
@@ -739,18 +765,20 @@
         ],
         "max_attempts": 3
       },
+      "semver": "1.0.0",
       "timeout_seconds": 45.0,
       "version": "1.0"
     },
     "write_file": {
       "destructive": true,
-      "digest": "07878b6e84f1ee2a",
+      "digest": "9abcc7f20b8cfa59",
       "errors": [
         "E_CONFLICT",
         "E_INTERNAL",
         "E_NOT_FOUND",
         "E_PERMISSION",
         "E_RESOURCE",
+        "E_TIMEOUT",
         "E_VALIDATION"
       ],
       "idempotency": "idempotent",
@@ -788,6 +816,7 @@
         ],
         "max_attempts": 1
       },
+      "semver": "1.1.0",
       "timeout_seconds": 30.0,
       "version": "1.0"
     }

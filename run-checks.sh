@@ -33,16 +33,30 @@ step "module self-tests" "$PY" run_selftests.py
 # 3. The cross-module suites.
 step "test suite" "$PY" -m unittest discover -s tests -p 'test_*.py' -b
 
-# 5. The contract layer's own invariants, stated loudly because a broken
-#    schema is invisible until a model sends the wrong argument.
 # 4. Contract drift: the registry, the lock file, the docs and the tests
 #    must still agree. This is the check that catches a tool added in one
 #    place and forgotten in three.
 step "contract drift" "$PY" -m fullagent.contractmanifest --check
 
-# The tool reference is generated from the registry. If the two disagree,
-# the docs are wrong, and confidently wrong docs are worse than none.
+# 5. The tool reference is generated from the registry. If the two
+#    disagree, the docs are wrong, and confidently wrong docs are worse
+#    than none.
 step "generated docs" "$PY" -m fullagent.introspect --check-docs
+
+# 6. The proof layer: every module's stated pre/postconditions and
+#    state-machine closures, checked rather than asserted in prose. This
+#    is the check that found three real defects on its first run.
+step "invariants" "$PY" -m fullagent.invariants --check
+
+# 7. Contract evolution: a breaking change to a tool contract needs a
+#    version bump and a migration, or it does not merge.
+step "contract governance" "$PY" -m fullagent.governance --gate
+
+# 8. The regression gate: the prompt, clauses, policy pipeline, recovery
+#    playbooks and contract lock are fingerprinted, and the two-armed
+#    adherence benchmark has to still hold AND still catch. A rule change
+#    with no benchmark behind it fails here.
+step "regression gate" "$PY" -m fullagent.regressiongate --check
 
 step "tool contracts" "$PY" -m fullagent.toolcontract
 step "dispatch core" "$PY" -m fullagent.dispatch

@@ -966,6 +966,39 @@ The prompt rule compiler takes **text**, not a path: `compile_prompt(name,
 text)` and `ratify_prompt(name, text)` ingest any prompt without a code
 change, and a test asserts neither module imports a prompt source.
 
+### The self-verifying layer
+
+Six more pieces sit on top of the platform layer. Where the platform
+layer makes a bad *state* unreachable, this one makes a bad *change*
+unmergeable.
+
+| Module | The state it makes unreachable |
+|---|---|
+| **invariants.py** | A guarantee that is only prose. 30 machine-checkable claims — preconditions, postconditions, state-machine closure, totality, consistency — run in CI on every commit. The report separates claims **proved** by enumerating every case from ones **checked** by sampling, because calling a sample a proof is the same lie as calling a green suite one. It found three real defects on its first run. |
+| **governance.py** | A breaking contract change slipping in unversioned. Every tool carries a semver beside (never inside) its digest; the gate computes the version a change *requires* and refuses one that is not versioned and carried by a migration. `Dispatcher(migrate=...)` applies the shim before validation, so the new schema is the only one enforced. |
+| **provenance.py** | A post-mortem that depends on what somebody remembers. Every policy verdict, call, plan, step, outcome, recovery and rollback becomes a content-addressed, HMAC-signed node with causal edges. Derived from the sealed log only — and where no cause was sealed it records a `Gap` rather than inventing one. |
+| **riskgrade.py** | A static risk label that stops describing reality. Grades come from observed failure rates, refusals and escalations — and **evidence may tighten a grade but never loosen it below the contract's declared floor**, however much of it there is. Every grade that moves produces a human-readable change report. |
+| **consensus.py** | A verifier whose bug is invisible to itself. A second, deterministic strategy re-checks every reply by a different route. Agreement releases or blocks; **a disagreement is held, never decided** — `unsure` never counts as a pass, a strategy that crashes becomes `unsure`, and nothing leaves a hold without a recorded `Resolution` naming who decided. |
+| **regressiongate.py** | A rule change that quietly stops the rules working. Six governed surfaces are fingerprinted; the adherence benchmark runs two arms — compliant turns must keep **holding**, violating turns must keep being **caught** — and a regression in either direction blocks with a typed reason that says what would clear it. Rolling drift windows catch the slide no single commit trips. |
+
+```bash
+python -m fullagent.invariants --check         # every stated guarantee, checked
+python -m fullagent.governance --gate          # contract versions and migrations
+python -m fullagent.regressiongate --status    # what is governed, and its digest
+python -m fullagent.regressiongate --check     # the two-armed benchmark + drift
+python -m fullagent.regressiongate --record ME # re-baseline after a rule change
+```
+
+All five are steps in `./run-checks.sh`, so a rule change with no
+benchmark behind it does not reach a green build.
+
+Two things this layer deliberately does **not** claim. An invariant
+proves what it states, not what you hoped it stated — which is why the
+proved/sampled split is printed rather than summed. And the regression
+gate runs scripted turns, so it regression-tests the *rule set*, not the
+model: "do these rules still catch what they used to catch" is a
+question CI can answer, "does the model obey them" is not.
+
 ## Security model
 
 The short version: **a call that violates the prompt or the machine's

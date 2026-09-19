@@ -7,23 +7,23 @@
 
 | Tool | Needs | Repeatable | Approval | Errors |
 |---|---|---|---|---|
-| `apply_patch` | fs.read, fs.write | non_idempotent | yes | 6 |
-| `copy_path` | fs.read, fs.write | idempotent | yes | 6 |
-| `create_directory` | fs.write | idempotent | no | 6 |
-| `delete_path` | fs.delete | unsafe | yes | 6 |
-| `edit_file` | fs.read, fs.write | non_idempotent | yes | 6 |
-| `file_info` | fs.read | idempotent | no | 6 |
-| `glob_files` | fs.read | idempotent | no | 6 |
-| `list_dir` | fs.read | idempotent | no | 6 |
+| `apply_patch` | fs.read, fs.write | non_idempotent | yes | 7 |
+| `copy_path` | fs.read, fs.write | idempotent | yes | 7 |
+| `create_directory` | fs.write | idempotent | no | 7 |
+| `delete_path` | fs.delete | unsafe | yes | 7 |
+| `edit_file` | fs.read, fs.write | non_idempotent | yes | 7 |
+| `file_info` | fs.read | idempotent | no | 7 |
+| `glob_files` | fs.read | idempotent | no | 7 |
+| `list_dir` | fs.read | idempotent | no | 7 |
 | `live_shell` | proc.exec | unsafe | yes | 5 |
 | `live_shell_reset` | proc.exec | idempotent | no | 5 |
-| `move_path` | fs.delete, fs.write | unsafe | yes | 6 |
-| `read_file` | fs.read | idempotent | no | 6 |
+| `move_path` | fs.delete, fs.write | unsafe | yes | 7 |
+| `read_file` | fs.read | idempotent | no | 7 |
 | `run_command` | proc.exec | unsafe | yes | 5 |
-| `search_files` | fs.read | idempotent | no | 6 |
+| `search_files` | fs.read | idempotent | no | 7 |
 | `web_fetch` | net.fetch | idempotent | yes | 5 |
 | `web_search` | net.fetch | idempotent | yes | 5 |
-| `write_file` | fs.read, fs.write | idempotent | yes | 6 |
+| `write_file` | fs.read, fs.write | idempotent | yes | 7 |
 
 ## `apply_patch`
 
@@ -35,7 +35,7 @@ Apply a unified diff (git diff / diff -u format) to the working tree. Multi-file
 
 **Needs:** fs.read, fs.write · **Repeatable:** non_idempotent · **Timeout:** 60s · **Approval:** required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `copy_path`
 
@@ -48,7 +48,7 @@ Copy a file or directory.
 
 **Needs:** fs.read, fs.write · **Repeatable:** idempotent · **Timeout:** 60s · **Approval:** required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `create_directory`
 
@@ -60,7 +60,7 @@ Create a directory (parents included).
 
 **Needs:** fs.write · **Repeatable:** idempotent · **Timeout:** 60s · **Approval:** not required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `delete_path`
 
@@ -72,7 +72,7 @@ Delete a file or directory permanently.
 
 **Needs:** fs.delete · **Repeatable:** unsafe · **Timeout:** 60s · **Approval:** required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `edit_file`
 
@@ -87,7 +87,7 @@ Replace an exact string in a file. old_string must match exactly (including inde
 
 **Needs:** fs.read, fs.write · **Repeatable:** non_idempotent · **Timeout:** 30s · **Approval:** required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `file_info`
 
@@ -99,7 +99,7 @@ Show metadata (size, mtime, type) for a path.
 
 **Needs:** fs.read · **Repeatable:** idempotent · **Timeout:** 20s · **Approval:** not required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `glob_files`
 
@@ -112,7 +112,7 @@ Find files by glob pattern, e.g. '**/*.py'.
 
 **Needs:** fs.read · **Repeatable:** idempotent · **Timeout:** 30s · **Approval:** not required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `list_dir`
 
@@ -124,7 +124,7 @@ List a directory's contents (one level).
 
 **Needs:** fs.read · **Repeatable:** idempotent · **Timeout:** 20s · **Approval:** not required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `live_shell`
 
@@ -160,7 +160,7 @@ Move/rename a file or directory.
 
 **Needs:** fs.delete, fs.write · **Repeatable:** unsafe · **Timeout:** 60s · **Approval:** required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `read_file`
 
@@ -174,7 +174,7 @@ Read a text file with line numbers. Use offset/limit for large files.
 
 **Needs:** fs.read · **Repeatable:** idempotent · **Timeout:** 20s · **Approval:** not required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `run_command`
 
@@ -201,7 +201,7 @@ Regex search through file contents (ripgrep-style). Returns path:line:content fo
 
 **Needs:** fs.read · **Repeatable:** idempotent · **Timeout:** 60s · **Approval:** not required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`
 
 ## `web_fetch`
 
@@ -238,4 +238,4 @@ Create or overwrite a file with the given content. Parent dirs are created.
 
 **Needs:** fs.read, fs.write · **Repeatable:** idempotent · **Timeout:** 30s · **Approval:** required
 
-**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_VALIDATION`
+**Can fail with:** `E_CONFLICT`, `E_INTERNAL`, `E_NOT_FOUND`, `E_PERMISSION`, `E_RESOURCE`, `E_TIMEOUT`, `E_VALIDATION`

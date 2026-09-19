@@ -407,8 +407,12 @@ _TRAITS: dict[str, dict] = {
                               E_UPSTREAM, E_INTERNAL)},
 }
 
+# Every filesystem tool runs under a dispatcher-enforced timeout, so
+# E_TIMEOUT is one of its outcomes whether or not the tool itself can
+# produce one. A contract that omitted it would let a caller written
+# against the contract meet a code it never handled.
 _FS_ERRORS = (E_VALIDATION, E_PERMISSION, E_NOT_FOUND, E_CONFLICT,
-              E_RESOURCE, E_INTERNAL)
+              E_TIMEOUT, E_RESOURCE, E_INTERNAL)
 
 
 _ERROR_TEXT_CODES = (

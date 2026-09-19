@@ -250,9 +250,17 @@ class TestRecoveryPlaybooks(unittest.TestCase):
         repeatable = recovery.Context(idempotent=True, max_attempts=3)
         self.assertEqual(recovery.plan(err, repeatable).strategy,
                          recovery.RETRY)
-        once = recovery.Context(idempotent=False, max_attempts=3)
+        # A call that cannot be repeated is not retried. What happens
+        # instead depends on what the context can actually carry out:
+        # escalating to a human who is not there is not a plan.
+        once = recovery.Context(idempotent=False, max_attempts=3,
+                                can_ask_human=True)
         self.assertEqual(recovery.plan(err, once).strategy,
                          recovery.ESCALATE)
+        alone = recovery.Context(idempotent=False, max_attempts=3,
+                                 can_ask_human=False)
+        self.assertEqual(recovery.plan(err, alone).strategy,
+                         recovery.ABORT)
 
     def test_a_playbook_cannot_overrule_the_taxonomy(self):
         for code in ERROR_CODES:

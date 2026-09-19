@@ -398,6 +398,198 @@ no session, no API key, no TUI.
 are worse than no docs, because people believe them; this makes the stale
 state unreachable rather than merely discouraged.
 
+## The proof layer (`invariants.py`)
+
+Every layer above states guarantees in prose. This one states them as
+predicates and runs them, so compliance is a checked property rather
+than a comment.
+
+An `Invariant` is a claim about one module, of one kind:
+
+| kind | what it asserts |
+| --- | --- |
+| `precondition` | what a call may assume on entry |
+| `postcondition` | what it guarantees on exit |
+| `closure` | a state machine reaches only declared states |
+| `totality` | a function answers for every input |
+| `consistency` | two views of the same thing agree |
+
+The report distinguishes an invariant **proved** by enumerating every
+case from one **checked** by sampling, and prints both counts. Blurring
+them would be the same mistake as calling a green test suite a proof:
+
+```
+INVARIANTS — 30 claim(s), 3601 case(s): 23 proved exhaustively, 7 checked by sampling
+```
+
+`run-checks.sh` runs `--check`, which exits nonzero on a broken claim.
+The layer earned its place on its first run by breaking three:
+
+1. `declares-dispatch-codes` — twelve filesystem tools omitted
+   `E_TIMEOUT` from their contracts while running under a
+   dispatcher-enforced timeout, so a real outcome was undeclared.
+2. `escalate-implies-human` — `recovery.plan()` returned ESCALATE in a
+   context with nobody to escalate to. The fix (`_reachable`) resolves
+   every downgrade against what the context can actually carry out, and
+   found three more instances of the same bug in the retry branches.
+3. `failure-is-accounted` — a nested saga's rollback results were
+   discarded, so a compensation that failed inside a sub-plan vanished
+   from the run result.
+
+None of these was visible to the test suite, because each was a gap
+between what a module promised and what it did, not a case anyone had
+thought to write a test for.
+
+## Contract governance (`governance.py`)
+
+`contractmanifest.py` classifies a contract change as additive or
+breaking. Governance decides what that obliges you to do about it.
+
+- Every tool carries a semantic version in `VERSIONS`. The version rides
+  *beside* the digest in the lock file, never inside it, so a version
+  bump and a behaviour change are distinguishable in a diff.
+- `verdicts()` computes the version each tool is *required* to be at,
+  given how it changed: breaking needs a major, additive a minor.
+- `gate()` refuses a change that is not versioned and carried — a
+  breaking change with no major bump, or a major bump with no migration
+  registered.
+- A `Migration` is a pure function from the old argument shape to the
+  new one. `MigrationRegistry.adapter()` produces the callable
+  `Dispatcher(migrate=...)` takes, applied **before** validation, so the
+  new schema is the only schema the dispatcher ever enforces and the
+  `ToolResult` records which shim ran.
+
+The gate is in `run-checks.sh`. A breaking change with no migration path
+does not reach a green build.
+
+## Provenance (`provenance.py`)
+
+Every policy verdict, dispatched call, plan, step, outcome, recovery
+decision, rollback and routing proposal becomes a node in a graph with
+causal edges: `governed-by`, `caused-by`, `part-of`, `decided-by`,
+`undid`.
+
+Two properties matter more than the queries:
+
+- **It is derived, never duplicated.** Nodes are built only from the
+  events in `SOURCE_EVENTS`; a node's id is a content hash over its
+  event. There is no second write path, so the graph cannot drift from
+  the log.
+- **A missing cause is a `Gap`, not an invention.** An allowed call has
+  no sealed policy verdict behind it, because the policy only seals
+  non-allow decisions. The graph records that absence instead of
+  inferring a verdict that was never taken.
+
+Nodes are HMAC-signed, so `verify(key)` names any node whose content no
+longer matches its signature. `explain(node_id)` walks the chain back
+into sentences a person can read in a post-mortem.
+
+## Adaptive risk grading (`riskgrade.py`)
+
+A tool's risk is declared by its contract (`destructive`,
+`outward_facing`, `idempotency`) and observed from what it has actually
+done: failure rate, error codes, policy refusals, human declines,
+escalations.
+
+The rule that makes this safe to automate:
+
+> **Evidence may tighten a grade. It may never loosen one below the
+> declared floor.**
+
+Twenty observations are enough to raise a grade. Two hundred flawless
+ones are still not enough to lower `delete_path` below `critical` — the
+report says so in the tool's own reasons rather than silently holding
+the line:
+
+> observed low over 250 calls, still held at the declared critical: a
+> tool that has not yet done damage is not a tool that cannot
+
+Every grade that moves produces a `Change` with a human-readable line
+and a sealed `riskgrade.changed` event.
+
+## Consensus audit (`consensus.py`)
+
+The guardrail checks a reply by binding each decidable rule to a
+predicate. A bug in that binding is invisible to itself: a predicate
+that never fires looks exactly like a rule that was never broken.
+
+So a second strategy checks the same reply against the same rules by a
+different route — from the rule text and the reply's surface rather than
+from the predicate bindings — and the auditor compares them.
+
+- Agreement on `pass` releases. Agreement on `fail` blocks.
+- **A disagreement is never resolved by picking a side.** Not by
+  majority, not by trusting the primary, not by silently trusting the
+  stricter one. It produces a `Disagreement` naming what each strategy
+  concluded and the specific question between them, and the reply is
+  **held** until something records a `Resolution` saying who decided and
+  why. Calling `resolve()` with nothing records the conservative
+  resolution, which blocks — so holding is a written decision rather
+  than something that happens in the dark.
+- `unsure` never counts as a pass, and a strategy that raises becomes
+  `unsure`. A verifier that fails open is not one.
+- `re_reason()` states the disagreement and asks for the evidence that
+  would settle it, without telling the model which side to take. A
+  re-reasoning prompt that leads the witness is an override with extra
+  steps.
+
+The shipped second strategy is **deterministic**: no model call, no API
+key, runs in every test. A verifier that needs the network is absent
+exactly when things are going wrong. `ModelStrategy` wraps any callable
+so a second *model* can be added as a third opinion where one is
+available — an addition to the deterministic pair, never a replacement,
+because two models agreeing is not evidence that either read the rules.
+
+## The regression gate (`regressiongate.py`)
+
+Every other layer checks a run. This one checks a *change*.
+
+**What is governed is fingerprinted, not remembered.** Six surfaces are
+hashed separately — the prompt text, the ratified constitution (which
+makes the rule *compiler* governed too), the clause predicates, the
+policy pipeline and its roles, the recovery playbooks, and the contract
+lock. A change to any of them moves a digest, so "did anything governed
+change?" is a comparison rather than a claim in a commit message. A
+clause whose directive is unchanged but whose predicate was swapped
+still shows.
+
+**The benchmark has two arms.** Scoring only good behaviour measures
+nothing: a clause set that was deleted scores a perfect 100%. So every
+scenario runs twice —
+
+- the **compliant** arm must keep holding. A clause that starts
+  objecting to correct work is a false positive, and false positives are
+  how a rule set gets switched off by the people it annoys.
+- the **violating** arm must keep catching. A clause that stops
+  objecting to the violation it exists for is a false negative, and a
+  false negative is indistinguishable from compliance in every report
+  downstream of it.
+
+Both arms weigh equally in the score. A regression in either direction
+blocks, with the clause named.
+
+Failures are typed, and every reason carries what would clear it:
+`no-baseline`, `ungoverned-change`, `measurement-broken`,
+`coverage-lost`, `false-positive`, `false-negative`, `score-regression`,
+`rule-dropped`, `drift-cliff`, `drift-slide`, `constitution-tampered`.
+
+Drift windows sit alongside the single-commit comparison: the sealed
+history of benchmark scores is cut into rolling windows, and a cliff or
+a slide across them blocks even when the newest run alone looks
+acceptable. A rule set that loses a little on every commit never trips a
+single-commit check.
+
+`regression.baseline.json` holds the recorded baseline, attributed to
+whoever recorded it. `--record` and `--check` go through the same code
+path, so a baseline can never be taken under a different fingerprint
+than the one it will be compared against.
+
+**What this gate does not measure.** It runs scripted turns, so it
+regression-tests the *rule set*, not the model. The question it answers
+is "do these rules still catch what they used to catch", not "does the
+model obey them". The second question is telemetry's, is answered
+against live traffic, and cannot be answered in CI at all.
+
 ## How this meets the compliance stack
 
 The prompt compliance stack decides *whether an action is allowed by the
@@ -472,3 +664,15 @@ errors by code. `format_status()` prints them.
   the advisory two thirds.
 - The rule compiler takes text, not a path, so any prompt ingests without
   a code change. It cannot tell you whether that prompt is any good.
+- An invariant proves what it states, not what you hoped it stated. The
+  report separates the 23 claims proved by enumeration from the 7
+  sampled, and a sampled claim is evidence, not a proof.
+- The regression gate runs scripted turns. It cannot tell you anything
+  about a model's behaviour, and a green gate is not evidence about any
+  model.
+- `verify()` on a constitution with no policies passes under any key.
+  An empty rule set has nothing to sign, which is correct and also means
+  "the signatures verify" says nothing on its own.
+- Risk grades are derived from what the log recorded. A tool that has
+  never been called has only its declared floor, which is the
+  conservative answer and not an informed one.
