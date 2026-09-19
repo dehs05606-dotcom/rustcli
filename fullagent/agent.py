@@ -39,6 +39,7 @@ from .adherence import exit_code_of
 from .audit import AuditTrail
 from .benchmark import run as run_benchmark
 from .compliance import ComplianceEngine
+from .telemetry import Telemetry
 from .constitution import ConstitutionalCore
 from .guardrail import ActionFacts, Guardrail, ResponseFacts
 from .toolpolicy import ASK as POLICY_ASK
@@ -444,6 +445,7 @@ class Agent:
         self.constitution = None
         self.guardrail = None
         self.compliance = None
+        self.telemetry = None
         self.tool_policy = None
         self.audit = None
         extra = getattr(self.cfg, "extra", {}) or {}
@@ -461,8 +463,13 @@ class Agent:
                 self.cfg.prompt, self._base_prompt(),
                 tool_names=frozenset(self.tools))
             level = guardrail_mod.VERIFY
-            self.compliance = ComplianceEngine(
-                self.log, floor=guardrail_mod.ADVISE, start=level)
+            # The telemetry owns the engine rather than shadowing it, so
+            # a turn observed through one is observed by both. Everything
+            # that already reads `self.compliance` keeps working.
+            self.telemetry = Telemetry(
+                ComplianceEngine(self.log, floor=guardrail_mod.ADVISE,
+                                 start=level), log=self.log)
+            self.compliance = self.telemetry.engine
             self.guardrail = Guardrail(self.constitution, log=self.log,
                                        level=level, max_attempts=2)
             self.audit = AuditTrail(self.log, constitution=self.constitution,
@@ -540,6 +547,8 @@ class Agent:
             parts.append(self.tool_policy.format_status())
         if self.compliance is not None:
             parts.append(self.compliance.format_status())
+        if self.telemetry is not None and self.telemetry.models():
+            parts.append(self.telemetry.format_report(self.cfg.prompt))
         if self.audit is not None:
             parts.append(self.audit.dashboard().format())
         return "\n\n".join(parts) or "compliance stack unavailable"
@@ -952,8 +961,9 @@ class Agent:
             # picture. This is what moves the guardrail's strength: a
             # model that keeps failing is checked harder next turn, and
             # one that keeps passing is eventually checked less.
-            if self.compliance is not None and turn.verification is not None:
-                self.compliance.observe(
+            recorder = self.telemetry or self.compliance
+            if recorder is not None and turn.verification is not None:
+                recorder.observe(
                     self.model.id,
                     1.0 - min(1.0, 0.25 * turn.verification.get("blocking", 0)
                               + 0.06 * max(0, turn.verification.get(

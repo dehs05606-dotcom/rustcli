@@ -48,8 +48,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import recovery
 from .dispatch import Dispatcher, ToolResult, TraceContext
-from .toolcontract import UNSAFE, ToolContract
+from .toolcontract import IDEMPOTENT, UNSAFE, ToolContract
 
 # -- step outcomes ----------------------------------------------------------
 PENDING = "pending"
@@ -59,6 +60,7 @@ FAILED = "failed"
 SKIPPED = "skipped"          # never ran: an earlier step failed
 COMPENSATED = "compensated"  # ran, then undone
 IRREVERSIBLE = "irreversible"  # ran, failed to undo, and said so
+ESCALATED = "escalated"      # ran, outcome unknown, deliberately not undone
 
 
 # ---------------------------------------------------------------------------
@@ -115,22 +117,37 @@ NO_EXPECTATION = Expectation()
 
 @dataclass(frozen=True)
 class Step:
-    """One tool call, what it is for, and how to undo it."""
+    """One tool call -- or one nested saga -- and how to undo it."""
     id: str
-    tool: str
-    args: dict
+    tool: str = ""
+    args: dict = field(default_factory=dict)
     why: str = ""
     expect: Expectation = NO_EXPECTATION
     undo_tool: str = ""
     undo_args: dict = field(default_factory=dict)
+    # A step may hold a whole plan instead of a call. Its compensation is
+    # then its children's, run in reverse -- which is what makes this a
+    # saga rather than a list: the unit of undo nests with the unit of
+    # work, so a sub-plan that fails cleans up after itself before its
+    # parent ever sees the failure.
+    sub: "Plan | None" = None
+
+    @property
+    def nested(self) -> bool:
+        return self.sub is not None
 
     @property
     def reversible(self) -> bool:
+        if self.nested:
+            return any(child.reversible for child in self.sub.steps)
         return bool(self.undo_tool)
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "tool": self.tool, "args": self.args,
-                "why": self.why, "reversible": self.reversible}
+        payload = {"id": self.id, "tool": self.tool, "args": self.args,
+                   "why": self.why, "reversible": self.reversible}
+        if self.nested:
+            payload["sub"] = self.sub.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -177,11 +194,17 @@ class LedgerEntry:
     duration: float = 0.0
     trace_id: str = ""
     detail: str = ""
+    path: str = ""          # "outer/inner" for a step inside a sub-saga
+    depth: int = 0
+    error_code: str = ""
+    recovery: str = ""      # the strategy the playbook chose
 
     def to_dict(self) -> dict:
         return {"step": self.step, "tool": self.tool, "status": self.status,
                 "attempts": self.attempts, "duration": round(self.duration, 4),
-                "trace_id": self.trace_id, "detail": self.detail}
+                "trace_id": self.trace_id, "detail": self.detail,
+                "path": self.path or self.step, "depth": self.depth,
+                "error_code": self.error_code, "recovery": self.recovery}
 
 
 @dataclass
@@ -193,10 +216,12 @@ class RunResult:
     review: PlanReview | None = None
     rolled_back: tuple[str, ...] = ()
     irreversible: tuple[str, ...] = ()
+    escalated: tuple[str, ...] = ()
 
     def entry(self, step_id: str) -> LedgerEntry | None:
+        """Find a ledger entry by step id, or by its full `outer/inner` path."""
         for e in self.ledger:
-            if e.step == step_id:
+            if e.step == step_id or e.path == step_id:
                 return e
         return None
 
@@ -204,19 +229,24 @@ class RunResult:
         return {"goal": self.goal, "ok": self.ok, "trace_id": self.trace_id,
                 "ledger": [e.to_dict() for e in self.ledger],
                 "rolled_back": list(self.rolled_back),
-                "irreversible": list(self.irreversible)}
+                "irreversible": list(self.irreversible),
+                "escalated": list(self.escalated)}
 
     def format(self) -> str:
         head = f"{'RUN OK' if self.ok else 'RUN FAILED'} — {self.goal}"
         lines = [head, f"  trace {self.trace_id}"]
         for e in self.ledger:
             mark = {DONE: "ok", FAILED: "FAIL", SKIPPED: "--",
-                    COMPENSATED: "undone",
+                    COMPENSATED: "undone", ESCALATED: "ESCALATED",
                     IRREVERSIBLE: "NOT UNDONE"}.get(e.status, e.status)
             detail = f" — {e.detail}" if e.detail else ""
-            lines.append(f"  {mark:>10}  {e.step:<18} {e.tool}{detail}")
+            name = ("  " * e.depth) + e.step
+            label = e.tool or "(saga)"
+            lines.append(f"  {mark:>10}  {name:<20} {label}{detail}")
         if self.irreversible:
             lines.append("  left in place: " + ", ".join(self.irreversible))
+        if self.escalated:
+            lines.append("  needs a human: " + ", ".join(self.escalated))
         return "\n".join(lines)
 
 
@@ -236,44 +266,19 @@ class Orchestrator:
     # -- planning ----------------------------------------------------------
 
     def review(self, plan: Plan) -> PlanReview:
-        """Decide whether a plan may run, without running any of it."""
+        """Decide whether a plan may run, without running any of it.
+
+        Recurses into sub-sagas, because a plan whose third sub-step names
+        a tool that does not exist is exactly as unrunnable as one whose
+        first step does, and finding that out after two writes have landed
+        is the failure this method exists to prevent.
+        """
         problems: list[str] = []
         approvals: list[str] = []
         irreversible: list[str] = []
-        seen: set[str] = set()
         available = set(self.dispatcher.negotiate().available)
-
-        for step in plan.steps:
-            if step.id in seen:
-                problems.append(f"{step.id}: duplicate step id")
-            seen.add(step.id)
-
-            contract = self.dispatcher.contract(step.tool)
-            if contract is None:
-                problems.append(f"{step.id}: no tool named '{step.tool}'")
-                continue
-            if step.tool not in available:
-                problems.append(
-                    f"{step.id}: '{step.tool}' is not available to this role")
-            bad = contract.validate_input(step.args)
-            if bad is not None:
-                problems.append(f"{step.id}: {bad.message}")
-            if contract.needs_approval:
-                approvals.append(f"{step.id} ({step.tool})")
-
-            if step.undo_tool:
-                undo = self.dispatcher.contract(step.undo_tool)
-                if undo is None:
-                    problems.append(
-                        f"{step.id}: undo names no tool '{step.undo_tool}'")
-                else:
-                    bad_undo = undo.validate_input(step.undo_args)
-                    if bad_undo is not None:
-                        problems.append(
-                            f"{step.id}: undo arguments are invalid: "
-                            f"{bad_undo.message}")
-            elif self._leaves_a_mark(contract):
-                irreversible.append(f"{step.id} ({step.tool})")
+        self._review_into(plan, "", available, problems, approvals,
+                          irreversible, set())
 
         if irreversible and not plan.accept_irreversible:
             problems.append(
@@ -282,6 +287,53 @@ class Orchestrator:
 
         return PlanReview(not problems, tuple(problems), tuple(approvals),
                           tuple(irreversible))
+
+    def _review_into(self, plan: Plan, prefix: str, available: set,
+                     problems: list, approvals: list, irreversible: list,
+                     seen: set) -> None:
+        for step in plan.steps:
+            path = f"{prefix}{step.id}"
+            if path in seen:
+                problems.append(f"{path}: duplicate step id")
+            seen.add(path)
+
+            if step.nested:
+                if step.tool:
+                    problems.append(
+                        f"{path}: a step is either a call or a sub-plan, "
+                        f"not both")
+                if not step.sub.steps:
+                    problems.append(f"{path}: the sub-plan has no steps")
+                self._review_into(step.sub, f"{path}/", available, problems,
+                                  approvals, irreversible, seen)
+                continue
+
+            contract = self.dispatcher.contract(step.tool)
+            if contract is None:
+                problems.append(f"{path}: no tool named '{step.tool}'")
+                continue
+            if step.tool not in available:
+                problems.append(
+                    f"{path}: '{step.tool}' is not available to this role")
+            bad = contract.validate_input(step.args)
+            if bad is not None:
+                problems.append(f"{path}: {bad.message}")
+            if contract.needs_approval:
+                approvals.append(f"{path} ({step.tool})")
+
+            if step.undo_tool:
+                undo = self.dispatcher.contract(step.undo_tool)
+                if undo is None:
+                    problems.append(
+                        f"{path}: undo names no tool '{step.undo_tool}'")
+                else:
+                    bad_undo = undo.validate_input(step.undo_args)
+                    if bad_undo is not None:
+                        problems.append(
+                            f"{path}: undo arguments are invalid: "
+                            f"{bad_undo.message}")
+            elif self._leaves_a_mark(contract):
+                irreversible.append(f"{path} ({step.tool})")
 
     @staticmethod
     def _leaves_a_mark(contract: ToolContract) -> bool:
@@ -303,8 +355,10 @@ class Orchestrator:
             ) -> RunResult:
         """Execute a plan. Returns a result; never raises."""
         ctx = trace.child() if trace is not None else TraceContext()
-        ledger = [LedgerEntry(s.id, s.tool) for s in plan.steps]
+        ledger: list[LedgerEntry] = []
+        _build_ledger(plan, "", 0, ledger)
         result = RunResult(plan.goal, False, ledger, ctx.trace_id)
+        index = {e.path: e for e in ledger}
 
         review = self.review(plan)
         result.review = review
@@ -334,41 +388,8 @@ class Orchestrator:
                             "reason": "approval"})
                 return result
 
-        completed: list[tuple[Step, LedgerEntry]] = []
-        failure: LedgerEntry | None = None
-
-        for step, entry in zip(plan.steps, ledger):
-            entry.status = RUNNING
-            self._seal("orchestrator.step", {
-                "step": step.id, "tool": step.tool, "why": step.why,
-                "trace_id": ctx.trace_id})
-            started = time.time()
-            call = self.dispatcher.call(step.tool, step.args, trace=ctx,
-                                        approve=approve_tool or (
-                                            lambda c, a: True))
-            entry.attempts = call.attempts
-            entry.duration = time.time() - started
-            entry.trace_id = call.trace_id
-
-            passed, why = step.expect.check(call)
-            entry.status = DONE if passed else FAILED
-            if not passed:
-                entry.detail = why
-            self._seal("orchestrator.step.done", {
-                "step": step.id, "status": entry.status,
-                "trace_id": call.trace_id, "detail": entry.detail})
-
-            if not passed:
-                failure = entry
-                # The step that failed may still have changed something --
-                # a write that landed and then failed its check is the
-                # ordinary case. Its compensation belongs in the rollback
-                # too, or the plan leaves behind exactly the file it was
-                # careful to be able to remove.
-                if call.ok or step.reversible:
-                    completed.append((step, entry))
-                break
-            completed.append((step, entry))
+        failure, completed = self._execute(plan, "", 0, ctx, approve_tool,
+                                           index)
 
         if failure is None:
             result.ok = True
@@ -380,32 +401,157 @@ class Orchestrator:
         for entry in ledger:
             if entry.status == PENDING:
                 entry.status = SKIPPED
-                entry.detail = f"stopped after {failure.step} failed"
+                entry.detail = f"stopped after {failure.path} failed"
 
         undone, stuck = self._rollback(completed, ctx, approve_tool)
         result.rolled_back = undone
         result.irreversible = stuck
+        result.escalated = tuple(e.path for e in ledger
+                                 if e.status == ESCALATED)
         self._seal("orchestrator.done", {
             "goal": plan.goal, "trace_id": ctx.trace_id, "ok": False,
-            "failed_step": failure.step, "rolled_back": list(undone),
-            "irreversible": list(stuck)})
+            "failed_step": failure.path, "rolled_back": list(undone),
+            "irreversible": list(stuck),
+            "escalated": list(result.escalated)})
         return result
 
-    def _rollback(self, completed, ctx, approve_tool
+    def _execute(self, plan: Plan, prefix: str, depth: int,
+                 ctx: TraceContext, approve_tool, index: dict
+                 ) -> tuple[LedgerEntry | None, list["_Undoable"]]:
+        """Run one plan's steps. Returns the failure and what can be undone.
+
+        A sub-saga that fails rolls its own children back before returning,
+        so by the time the parent sees the failure the child is already in
+        a known state.
+        """
+        completed: list[_Undoable] = []
+        for step in plan.steps:
+            path = f"{prefix}{step.id}"
+            entry = index[path]
+            entry.status = RUNNING
+            self._seal("orchestrator.step", {
+                "step": step.id, "path": path, "depth": depth,
+                "tool": step.tool, "why": step.why, "nested": step.nested,
+                "trace_id": ctx.trace_id})
+
+            if step.nested:
+                inner_failure, inner_done = self._execute(
+                    step.sub, f"{path}/", depth + 1, ctx, approve_tool, index)
+                if inner_failure is None:
+                    entry.status = DONE
+                    entry.detail = f"{len(step.sub.steps)} step(s)"
+                    self._seal("orchestrator.step.done",
+                               {"step": step.id, "path": path,
+                                "status": entry.status,
+                                "trace_id": ctx.trace_id,
+                                "detail": entry.detail})
+                    completed.append(_Undoable(step, entry, inner_done))
+                    continue
+                # The child cleaned up after itself; the parent only needs
+                # to know that this step did not happen.
+                self._rollback(inner_done, ctx, approve_tool)
+                entry.status = FAILED
+                entry.detail = f"sub-plan failed at {inner_failure.path}"
+                self._seal("orchestrator.step.done",
+                           {"step": step.id, "path": path, "status": FAILED,
+                            "trace_id": ctx.trace_id, "detail": entry.detail})
+                return entry, completed
+
+            started = time.time()
+            call = self.dispatcher.call(step.tool, step.args, trace=ctx,
+                                        approve=approve_tool or (
+                                            lambda c, a: True))
+            entry.attempts = call.attempts
+            entry.duration = time.time() - started
+            entry.trace_id = call.trace_id
+            entry.error_code = call.error.code if call.error else ""
+
+            passed, why = step.expect.check(call)
+            entry.status = DONE if passed else FAILED
+            if not passed:
+                entry.detail = why
+                entry.recovery = self._disposition(step, call, entry)
+                # The step that failed may still have changed something --
+                # a write that landed and then failed its check is the
+                # ordinary case -- so its compensation belongs in the
+                # rollback, unless the playbook says we cannot know.
+                if entry.recovery == recovery.COMPENSATE and (
+                        call.ok or step.reversible):
+                    completed.append(_Undoable(step, entry))
+                elif entry.recovery == recovery.ESCALATE:
+                    entry.status = ESCALATED
+            # Sealed after the disposition, so the log carries the status
+            # the run actually ended on rather than an intermediate one.
+            self._seal("orchestrator.step.done", {
+                "step": step.id, "path": path, "status": entry.status,
+                "trace_id": call.trace_id, "detail": entry.detail,
+                "error_code": entry.error_code,
+                "recovery": entry.recovery})
+            if not passed:
+                return entry, completed
+
+            completed.append(_Undoable(step, entry))
+        return None, completed
+
+    def _disposition(self, step: Step, call: ToolResult,
+                     entry: LedgerEntry) -> str:
+        """What the taxonomy says to do about this particular failure.
+
+        A verification failure is not an error code: the call ran and we
+        watched it, so we know what landed and can undo it. An error code
+        is where the playbooks earn their keep -- a timeout on a call that
+        cannot be repeated is the case where undoing and retrying are both
+        wrong, and only a human can find out what actually happened.
+        """
+        if call.error is None:
+            return recovery.COMPENSATE
+        contract = self.dispatcher.contract(step.tool)
+        context = recovery.Context(
+            idempotent=(contract is not None
+                        and contract.idempotency == IDEMPOTENT),
+            has_compensation=step.reversible,
+            can_ask_human=self.approve is not None,
+            attempts=call.attempts,
+            max_attempts=(contract.retry.max_attempts if contract else 1),
+            approval_refused=call.approved is False)
+        verdict = recovery.plan(call.error, context)
+        entry.detail = f"{entry.detail}; {verdict.reason}".strip("; ")
+        # RETRY here means the dispatcher already spent its attempts: the
+        # plan level has nothing further to try, so it becomes a question
+        # for a person rather than another identical call.
+        return (recovery.ESCALATE if verdict.strategy == recovery.RETRY
+                else verdict.strategy)
+
+    def _rollback(self, completed: list["_Undoable"], ctx, approve_tool
                   ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Undo completed steps in reverse. Reports what it could not."""
+        """Undo completed work in reverse. Reports what it could not."""
         undone: list[str] = []
         stuck: list[str] = []
-        for step, entry in reversed(completed):
+        for item in reversed(completed):
+            step, entry = item.step, item.entry
             failed = entry.status == FAILED
+
+            if step.nested:
+                # A saga's compensation is its children's, in reverse.
+                inner_undone, inner_stuck = self._rollback(
+                    item.children, ctx, approve_tool)
+                undone.extend(inner_undone)
+                stuck.extend(inner_stuck)
+                entry.status = COMPENSATED if not inner_stuck else IRREVERSIBLE
+                entry.detail = (f"{len(inner_undone)} child step(s) undone"
+                                if not inner_stuck else
+                                f"{len(inner_stuck)} child step(s) left")
+                continue
+
             if not step.reversible:
                 if not failed:
                     entry.status = IRREVERSIBLE
                     entry.detail = "no compensation was declared"
                 else:
                     entry.detail += "; no compensation was declared"
-                stuck.append(step.id)
+                stuck.append(entry.path)
                 continue
+
             call = self.dispatcher.call(step.undo_tool, step.undo_args,
                                         trace=ctx,
                                         approve=approve_tool or (
@@ -419,7 +565,7 @@ class Orchestrator:
                 else:
                     entry.status = COMPENSATED
                     entry.detail = f"undone with {step.undo_tool}"
-                undone.append(step.id)
+                undone.append(entry.path)
             else:
                 reason = call.error.message if call.error else "?"
                 if failed:
@@ -427,16 +573,154 @@ class Orchestrator:
                 else:
                     entry.status = IRREVERSIBLE
                     entry.detail = f"undo failed: {reason}"
-                stuck.append(step.id)
+                stuck.append(entry.path)
             self._seal("orchestrator.rollback", {
-                "step": step.id, "tool": step.undo_tool, "ok": call.ok,
-                "trace_id": ctx.trace_id})
+                "step": step.id, "path": entry.path, "tool": step.undo_tool,
+                "ok": call.ok, "trace_id": ctx.trace_id})
         return tuple(undone), tuple(stuck)
 
 
+@dataclass
+class _Undoable:
+    """A piece of completed work and how to take it back."""
+    step: Step
+    entry: LedgerEntry
+    children: list["_Undoable"] = field(default_factory=list)
+
+
+def _build_ledger(plan: Plan, prefix: str, depth: int,
+                  out: list[LedgerEntry]) -> None:
+    """One entry per step, sub-sagas included, in execution order."""
+    for step in plan.steps:
+        path = f"{prefix}{step.id}"
+        out.append(LedgerEntry(step.id, step.tool, path=path, depth=depth))
+        if step.nested:
+            _build_ledger(step.sub, f"{path}/", depth + 1, out)
+
+
 # ---------------------------------------------------------------------------
-# Self-test
+# Replay
 # ---------------------------------------------------------------------------
+
+@dataclass
+class Replay:
+    """A run reconstructed from the event log, for a post-mortem.
+
+    Deterministic by construction: it reads only sealed events, in seq
+    order, and computes nothing. Two replays of the same log are the same
+    replay, which is the property that makes it usable as evidence.
+    """
+    trace_id: str
+    goal: str = ""
+    found: bool = False
+    ok: bool | None = None
+    ledger: tuple[LedgerEntry, ...] = ()
+    rolled_back: tuple[str, ...] = ()
+    irreversible: tuple[str, ...] = ()
+    escalated: tuple[str, ...] = ()
+    failed_step: str = ""
+    events: int = 0
+
+    def entry(self, path: str) -> LedgerEntry | None:
+        for e in self.ledger:
+            if e.path == path or e.step == path:
+                return e
+        return None
+
+    def to_dict(self) -> dict:
+        return {"trace_id": self.trace_id, "goal": self.goal,
+                "found": self.found, "ok": self.ok, "events": self.events,
+                "failed_step": self.failed_step,
+                "ledger": [e.to_dict() for e in self.ledger],
+                "rolled_back": list(self.rolled_back),
+                "irreversible": list(self.irreversible),
+                "escalated": list(self.escalated)}
+
+    def format(self) -> str:
+        if not self.found:
+            return f"REPLAY — nothing sealed under trace {self.trace_id}"
+        verdict = "ok" if self.ok else ("failed" if self.ok is False
+                                        else "incomplete")
+        lines = [f"REPLAY {verdict} — {self.goal}",
+                 f"  trace {self.trace_id} · {self.events} event(s)"]
+        for e in self.ledger:
+            detail = f" — {e.detail}" if e.detail else ""
+            name = ("  " * e.depth) + e.path.rsplit("/", 1)[-1]
+            lines.append(f"  {e.status:>11}  {name:<20} "
+                         f"{e.tool or '(saga)'}{detail}")
+        if self.failed_step:
+            lines.append(f"  stopped at {self.failed_step}")
+        if self.escalated:
+            lines.append("  needs a human: " + ", ".join(self.escalated))
+        return "\n".join(lines)
+
+
+ORCHESTRATOR_EVENTS = ("orchestrator.plan", "orchestrator.step",
+                       "orchestrator.step.done", "orchestrator.rollback",
+                       "orchestrator.refused", "orchestrator.done")
+
+
+def replay(log, trace_id: str) -> Replay:
+    """Rebuild one run from the event log, by its trace id."""
+    out = Replay(trace_id)
+    entries: dict[str, LedgerEntry] = {}
+    order: list[str] = []
+    rolled: list[str] = []
+
+    for ev in log.events():
+        if ev.type not in ORCHESTRATOR_EVENTS:
+            continue
+        data = ev.data if isinstance(ev.data, dict) else {}
+        if data.get("trace_id") != trace_id:
+            continue
+        out.events += 1
+
+        if ev.type == "orchestrator.plan":
+            out.found = True
+            out.goal = str(data.get("goal", ""))
+            if not data.get("ok", True):
+                out.ok = False
+        elif ev.type == "orchestrator.step":
+            path = str(data.get("path") or data.get("step") or "")
+            if path not in entries:
+                entries[path] = LedgerEntry(
+                    str(data.get("step") or path), str(data.get("tool") or ""),
+                    status=RUNNING, path=path, depth=int(data.get("depth", 0)))
+                order.append(path)
+        elif ev.type == "orchestrator.step.done":
+            path = str(data.get("path") or data.get("step") or "")
+            entry = entries.get(path)
+            if entry is None:
+                entry = LedgerEntry(str(data.get("step") or path), "",
+                                    path=path)
+                entries[path] = entry
+                order.append(path)
+            entry.status = str(data.get("status") or entry.status)
+            entry.detail = str(data.get("detail") or "")
+            entry.error_code = str(data.get("error_code") or "")
+            entry.recovery = str(data.get("recovery") or "")
+        elif ev.type == "orchestrator.rollback":
+            path = str(data.get("path") or data.get("step") or "")
+            entry = entries.get(path)
+            if entry is not None and data.get("ok"):
+                entry.status = (entry.status if entry.status == FAILED
+                                else COMPENSATED)
+                rolled.append(path)
+        elif ev.type == "orchestrator.refused":
+            out.found = True
+            out.ok = False
+        elif ev.type == "orchestrator.done":
+            out.ok = bool(data.get("ok"))
+            out.failed_step = str(data.get("failed_step") or "")
+            out.rolled_back = tuple(data.get("rolled_back") or rolled)
+            out.irreversible = tuple(data.get("irreversible") or ())
+            out.escalated = tuple(data.get("escalated") or ())
+
+    out.ledger = tuple(entries[p] for p in order)
+    if not out.rolled_back:
+        out.rolled_back = tuple(rolled)
+    return out
+
 
 if __name__ == "__main__":
     import os
@@ -579,6 +863,121 @@ if __name__ == "__main__":
                  undo_tool="delete_path", undo_args={"path": hostile_path}),)))
         assert not blew.ok and not os.path.exists(hostile_path)
 
+        # --- a nested saga cleans up after itself -------------------------
+        inner_a = os.path.join(workdir, "inner_a.txt")
+        inner_b = os.path.join(workdir, "inner_b.txt")
+        outer_a = os.path.join(workdir, "outer_a.txt")
+
+        def writer(step_id, path, expect_text=None):
+            return Step(step_id, "write_file",
+                        {"path": path, "content": "x\n"},
+                        expect=Expectation(path_exists=(path,))
+                        if expect_text is None
+                        else Expectation(contains=(expect_text,)),
+                        undo_tool="delete_path", undo_args={"path": path})
+
+        nested_ok = Plan("outer", (
+            writer("outer-a", outer_a),
+            Step("inner", sub=Plan("inner", (
+                writer("inner-a", inner_a),
+                writer("inner-b", inner_b),
+            ))),
+        ))
+        deep = orch.run(nested_ok)
+        assert deep.ok, deep.format()
+        assert all(os.path.exists(p) for p in (outer_a, inner_a, inner_b))
+        assert deep.entry("inner/inner-b").depth == 1, deep.format()
+        assert deep.entry("inner").tool == "", "a saga makes no call of its own"
+
+        for path in (outer_a, inner_a, inner_b):
+            os.remove(path)
+
+        # a sub-saga that fails rolls back its own children, and the
+        # parent then rolls back everything it had completed
+        nested_bad = Plan("outer", (
+            writer("outer-a", outer_a),
+            Step("inner", sub=Plan("inner", (
+                writer("inner-a", inner_a),
+                writer("inner-b", inner_b, expect_text="never written"),
+            ))),
+            writer("never", os.path.join(workdir, "never.txt")),
+        ))
+        broke = orch.run(nested_bad)
+        assert not broke.ok, broke.format()
+        assert broke.entry("inner").status == FAILED
+        assert broke.entry("inner/inner-a").status == COMPENSATED, broke.format()
+        assert broke.entry("outer-a").status == COMPENSATED, broke.format()
+        assert broke.entry("never").status == SKIPPED
+        for path in (outer_a, inner_a, inner_b):
+            assert not os.path.exists(path), f"{path} survived the rollback"
+
+        # a sub-plan naming a tool that does not exist is refused whole
+        bogus = orch.run(Plan("outer", (
+            writer("outer-a", outer_a),
+            Step("inner", sub=Plan("inner", (
+                Step("nope", "teleport", {"path": "x"}),))),
+        )))
+        assert not bogus.ok
+        assert any("inner/nope" in p for p in bogus.review.problems), \
+            bogus.review.format()
+        assert not os.path.exists(outer_a), "the plan half-ran"
+
+        # --- an unrepeatable failure is escalated, not guessed at ---------
+        from .toolcontract import NON_IDEMPOTENT, TEXT_OUT, ToolContract
+        one_arg = {"type": "object",
+                   "properties": {"path": {"type": "string"}},
+                   "required": ["path"]}
+
+        def unreachable(**kw):
+            raise ConnectionError("the far end went away")
+
+        escalating = Dispatcher(policy=ToolPolicy("developer", log=log,
+                                                  roots=(workdir,)),
+                                log=log, approve=lambda c, a: True)
+        escalating.register_registry(registry, contracts)
+        escalating.register(
+            ToolContract("one_shot", "cannot be repeated", one_arg,
+                         TEXT_OUT, frozenset({"fs.read"}),
+                         idempotency=NON_IDEMPOTENT), unreachable)
+        risky = Orchestrator(escalating, log=log, approve=lambda p, r: True)
+
+        kept = os.path.join(workdir, "kept.txt")
+        unknown = risky.run(Plan("a call we cannot repeat or undo", (
+            writer("first", kept),
+            Step("one-shot", "one_shot", {"path": "x"}),
+        ), accept_irreversible=True))
+        assert not unknown.ok, unknown.format()
+        shot = unknown.entry("one-shot")
+        assert shot.status == ESCALATED, unknown.format()
+        assert shot.error_code == "E_UPSTREAM", shot.to_dict()
+        assert shot.recovery == "escalate", shot.to_dict()
+        assert "one-shot" in unknown.escalated
+        assert unknown.entry("first").status == COMPENSATED, unknown.format()
+        assert not os.path.exists(kept)
+
+        # --- replay reconstructs a run from the log alone -----------------
+        seen = replay(log, deep.trace_id)
+        assert seen.found and seen.ok, seen.format()
+        assert seen.goal == "outer"
+        assert [e.path for e in seen.ledger] == \
+            [e.path for e in deep.ledger], seen.format()
+        assert replay(log, deep.trace_id).to_dict() == seen.to_dict(), \
+            "replay is not deterministic"
+
+        failed_replay = replay(log, broke.trace_id)
+        assert failed_replay.ok is False
+        assert failed_replay.failed_step == "inner", failed_replay.format()
+        assert failed_replay.entry("inner/inner-a").status == COMPENSATED
+
+        escalated_replay = replay(log, unknown.trace_id)
+        assert escalated_replay.escalated == ("one-shot",), \
+            escalated_replay.format()
+        assert escalated_replay.entry("one-shot").status == ESCALATED, \
+            "the log must carry the status the run ended on"
+        assert escalated_replay.entry("one-shot").recovery == "escalate"
+
+        assert not replay(log, "0" * 16).found
+
         # --- the ledger reached the event log -----------------------------
         kinds = [e.type for e in log.events()]
         for wanted in ("orchestrator.plan", "orchestrator.step",
@@ -588,6 +987,8 @@ if __name__ == "__main__":
 
         print(out.format())
         print(bad.format())
+        print(broke.format())
+        print(escalated_replay.format())
         print("ORCHESTRATOR SELF-TEST PASS")
     finally:
         os.chdir(here)

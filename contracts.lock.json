@@ -1,0 +1,795 @@
+{
+  "contract_version": "1.0",
+  "digest": "17cd49a02e124ef9",
+  "tools": {
+    "apply_patch": {
+      "destructive": true,
+      "digest": "93058dc77b368f4b",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "non_idempotent",
+      "input_schema": {
+        "properties": {
+          "patch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "type": "object"
+      },
+      "name": "apply_patch",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read",
+        "fs.write"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 60.0,
+      "version": "1.0"
+    },
+    "copy_path": {
+      "destructive": true,
+      "digest": "60acfc50d8d2e3e0",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "dst": {
+            "type": "string"
+          },
+          "src": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "src",
+          "dst"
+        ],
+        "type": "object"
+      },
+      "name": "copy_path",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read",
+        "fs.write"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 60.0,
+      "version": "1.0"
+    },
+    "create_directory": {
+      "destructive": false,
+      "digest": "3daba59e2e5b11c7",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "create_directory",
+      "needs_approval": false,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.write"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 60.0,
+      "version": "1.0"
+    },
+    "delete_path": {
+      "destructive": true,
+      "digest": "43e589138af8275f",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "unsafe",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "delete_path",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.delete"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 60.0,
+      "version": "1.0"
+    },
+    "edit_file": {
+      "destructive": true,
+      "digest": "407de583de5417b7",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "non_idempotent",
+      "input_schema": {
+        "properties": {
+          "new_string": {
+            "type": "string"
+          },
+          "old_string": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "replace_all": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "type": "object"
+      },
+      "name": "edit_file",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read",
+        "fs.write"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 30.0,
+      "version": "1.0"
+    },
+    "file_info": {
+      "destructive": false,
+      "digest": "6efe68d6e2adedc8",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_info",
+      "needs_approval": false,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 20.0,
+      "version": "1.0"
+    },
+    "glob_files": {
+      "destructive": false,
+      "digest": "0dedd4f7ccba54f4",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "glob_files",
+      "needs_approval": false,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 30.0,
+      "version": "1.0"
+    },
+    "list_dir": {
+      "destructive": false,
+      "digest": "35c9bb0936b394f4",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_dir",
+      "needs_approval": false,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 20.0,
+      "version": "1.0"
+    },
+    "live_shell": {
+      "destructive": true,
+      "digest": "98872269f46c6e8f",
+      "errors": [
+        "E_INTERNAL",
+        "E_PERMISSION",
+        "E_TIMEOUT",
+        "E_UPSTREAM",
+        "E_VALIDATION"
+      ],
+      "idempotency": "unsafe",
+      "input_schema": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout": {
+            "description": "seconds, default 120",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "name": "live_shell",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "proc.exec"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 300.0,
+      "version": "1.0"
+    },
+    "live_shell_reset": {
+      "destructive": false,
+      "digest": "79d2d8692bb2885b",
+      "errors": [
+        "E_INTERNAL",
+        "E_PERMISSION",
+        "E_TIMEOUT",
+        "E_UPSTREAM",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "live_shell_reset",
+      "needs_approval": false,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "proc.exec"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 60.0,
+      "version": "1.0"
+    },
+    "move_path": {
+      "destructive": true,
+      "digest": "89d78cdf4255e6a2",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "unsafe",
+      "input_schema": {
+        "properties": {
+          "dst": {
+            "type": "string"
+          },
+          "src": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "src",
+          "dst"
+        ],
+        "type": "object"
+      },
+      "name": "move_path",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.delete",
+        "fs.write"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 60.0,
+      "version": "1.0"
+    },
+    "read_file": {
+      "destructive": false,
+      "digest": "83962f1840a6e364",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "limit": {
+            "description": "max lines (default 1000)",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "first line (1-based)",
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file",
+      "needs_approval": false,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 20.0,
+      "version": "1.0"
+    },
+    "run_command": {
+      "destructive": true,
+      "digest": "9b4bb9639d4a9418",
+      "errors": [
+        "E_INTERNAL",
+        "E_PERMISSION",
+        "E_TIMEOUT",
+        "E_UPSTREAM",
+        "E_VALIDATION"
+      ],
+      "idempotency": "unsafe",
+      "input_schema": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout": {
+            "description": "seconds, default 120",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "name": "run_command",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "proc.exec"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 300.0,
+      "version": "1.0"
+    },
+    "search_files": {
+      "destructive": false,
+      "digest": "99b6ce1269464383",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "glob_filter": {
+            "description": "filename glob, e.g. '*.py'",
+            "type": "string"
+          },
+          "path": {
+            "description": "dir or file to search",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "regex pattern",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "search_files",
+      "needs_approval": false,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 60.0,
+      "version": "1.0"
+    },
+    "web_fetch": {
+      "destructive": false,
+      "digest": "9e361aa6949d1fd8",
+      "errors": [
+        "E_INTERNAL",
+        "E_PERMISSION",
+        "E_TIMEOUT",
+        "E_UPSTREAM",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "web_fetch",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": true,
+      "permission": [
+        "net.fetch"
+      ],
+      "retry": {
+        "backoff_seconds": 0.5,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 3
+      },
+      "timeout_seconds": 30.0,
+      "version": "1.0"
+    },
+    "web_search": {
+      "destructive": false,
+      "digest": "665203456ecbfeeb",
+      "errors": [
+        "E_INTERNAL",
+        "E_PERMISSION",
+        "E_TIMEOUT",
+        "E_UPSTREAM",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "web_search",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": true,
+      "permission": [
+        "net.fetch"
+      ],
+      "retry": {
+        "backoff_seconds": 0.5,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 3
+      },
+      "timeout_seconds": 45.0,
+      "version": "1.0"
+    },
+    "write_file": {
+      "destructive": true,
+      "digest": "07878b6e84f1ee2a",
+      "errors": [
+        "E_CONFLICT",
+        "E_INTERNAL",
+        "E_NOT_FOUND",
+        "E_PERMISSION",
+        "E_RESOURCE",
+        "E_VALIDATION"
+      ],
+      "idempotency": "idempotent",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "write_file",
+      "needs_approval": true,
+      "output_schema": {
+        "description": "tool output as text",
+        "type": "string"
+      },
+      "outward_facing": false,
+      "permission": [
+        "fs.read",
+        "fs.write"
+      ],
+      "retry": {
+        "backoff_seconds": 0.0,
+        "codes": [
+          "E_TIMEOUT",
+          "E_UPSTREAM"
+        ],
+        "max_attempts": 1
+      },
+      "timeout_seconds": 30.0,
+      "version": "1.0"
+    }
+  }
+}

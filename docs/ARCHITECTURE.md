@@ -23,7 +23,7 @@ work out why a call was refused.
           ┌──────────────────▼──────────────────┐
           │  Dispatcher                         │
           │   1. validate against the contract  │
-          │   2. policy: capability, path, host │
+          │   2. policy pipeline (7 stages)     │
           │   3. approval (default deny)        │
           │   4. run, bounded by a timeout      │
           │   5. classify the failure           │
@@ -254,6 +254,150 @@ outcome) per step, `orchestrator.rollback` per compensation, and
 `orchestrator.done`. The intent is sealed *before* the call, so a crash
 between the two still leaves a record of what touched the file.
 
+## The policy pipeline (`policypipeline.py`)
+
+The permission decision is seven ordered stages, each a small object with
+a name and one question:
+
+```
+manifest -> capability -> path-confinement -> command-policy
+         -> network-allow-list -> ceiling -> ask-capability
+```
+
+Each stage takes a `Request` and nothing else -- no policy object, no
+session -- which is what makes one testable on its own. Before this, a
+path-confinement test was also, silently, a capability test, because the
+call had to get past the capability check to reach the path check.
+
+Each stage returns a `Rationale` with a sentence for a person and `facts`
+for a machine. A decision carries the whole list, allowing stages
+included, because "why was this permitted" is as much an audit question
+as "why was this refused". `audit.py` counts denials by stage and by
+typed code, which is a question an audit trail of English strings cannot
+answer.
+
+Two rules:
+
+- **A deny anywhere beats an ask anywhere.** The old single-function
+  policy returned at the first objection, so a command that merely
+  *asked* returned before the ceiling and the host were consulted. Asking
+  a human to approve a call that a later stage would refuse teaches them
+  that approving is how you make the machine stop complaining.
+- **A stage that crashes denies.** Failing closed is the only safe
+  reading of "we do not know".
+
+`ToolPolicy.evaluate()` is the collapse of `evaluate_detailed()` to a
+single verdict. They cannot disagree, because one is computed from the
+other, and a test asserts it across allow, ask and deny.
+
+## Contract evolution (`contractmanifest.py`)
+
+"Derived, never restated" is a property that decays quietly. Nobody
+notices the second copy of a schema the day it appears; they notice six
+weeks later when the model sends an argument the dispatcher rejects. So:
+
+- **`contracts.lock.json`** is every contract, serialised in a stable
+  order with a digest per tool and one for the set, committed to the
+  repo. It is the answer to "what did this agent promise its tools would
+  do, as of this commit". Descriptions are excluded and error lists are
+  sorted, so prose edits and tuple reordering do not move the digest.
+- **Compatibility is classified, not merely detected.** Additive: a new
+  optional argument, a new error code, a new tool, a dropped requirement,
+  newly needing approval. Breaking: a new *required* argument, a removed
+  property, a narrowed type, a newly required capability, a removed tool,
+  weakened idempotency, or a **lost** approval requirement.
+- **Drift** is checked across registry, lock file, docs and tests:
+  `unlocked-tool`, `stale-lock-entry`, `contract-changed`, `no-capability`,
+  `stale-trait`, `restated-schema`, `untested-tool`, `undocumented-tool`.
+  `run-checks.sh` fails on any of them. The first run found six tools no
+  test mentioned; they have tests now.
+
+## Recovery playbooks (`recovery.py`)
+
+The taxonomy says what went wrong and whether a call may be repeated.
+That is not the same as knowing what to do, and the gap is where agents
+behave badly. Every code maps to one of four strategies -- `retry`,
+`compensate`, `escalate`, `abort` -- with the conditions under which it
+applies and the fallback when they do not.
+
+Two rules decide almost every case, and both are about what is *not*
+known:
+
+- **Repeatability gates retry.** A timeout on a non-idempotent call is an
+  escalation, not a retry: a timeout means the call was abandoned rather
+  than observed, so it may have completed. Repeating could double the
+  effect; undoing could undo something that never happened.
+- **A compensation you do not have is not a plan.** `compensate`
+  downgrades to `escalate` rather than reporting a rollback that did not
+  occur.
+
+A playbook can never overrule the taxonomy: a policy naming a final code
+as retryable is refused, not honoured. `PLAYBOOKS` and `ERROR_CODES` are
+asserted to have the same keys, so a tenth code cannot be added without
+someone deciding what to do about it.
+
+## The transaction engine
+
+`orchestrator.py` grew three things:
+
+**Nested sagas.** A `Step` may hold a whole `Plan` instead of a call. Its
+compensation is its children's, run in reverse. A sub-saga that fails
+rolls its own children back *before* returning, so by the time the parent
+sees the failure the child is already in a known state. `review()`
+recurses, so a plan whose third sub-step names a tool that does not exist
+is refused before the first write lands.
+
+**Playbook-driven disposition.** The earlier steps always unwind -- that
+is the saga. What happens to the *failing* step comes from its error
+code. A verification failure compensates, because the call ran and we
+watched it. An unrepeatable upstream failure is marked `escalated` and
+deliberately left alone, with "needs a human" in the result.
+
+**Deterministic replay.** `replay(log, trace_id)` rebuilds a run from
+sealed events alone, in seq order, computing nothing. Two replays of the
+same log are the same replay, which is the property that makes one usable
+as evidence. Step outcomes are sealed after their disposition, so the log
+carries the status the run actually ended on.
+
+## Model telemetry (`telemetry.py`)
+
+`compliance.py` keeps one number per model; `benchmark.py` scores models
+on fixed scenarios. Telemetry joins them into a scorecard, and adds two
+things:
+
+- **Rolling windows**, in order, rather than one window against a frozen
+  baseline. A model that fell off a cliff and one that has been sliding
+  for a fortnight both read as "drifted" against a baseline; only a
+  series tells them apart, and they want different responses. A trailing
+  partial window is dropped rather than averaged in.
+- **Proposals, never switches.** `routing()` returns a `RoutingProposal`
+  carrying the numbers that produced it. `in_effect` stays the *current*
+  model until `accept(proposal, who)` is called with a name. There is no
+  code path in the module that changes which model runs. A router that
+  switched on its own would make every later result unattributable.
+
+A model with fewer than one full window of observations is reported but
+never recommended, and the proposal says why in words.
+
+## The self-describing runtime (`introspect.py`)
+
+```
+python -m fullagent.introspect              everything, as text
+python -m fullagent.introspect tools --json machine-readable
+python -m fullagent.introspect --write-docs regenerate docs/TOOLS.md
+python -m fullagent.introspect --check-docs fail if they are stale
+```
+
+`describe()` returns the registry, the active policy stages and roles,
+contract digests and lock state, the recovery playbooks, live dispatcher
+metrics and model scorecards, as plain JSON-serialisable data. Headless:
+no session, no API key, no TUI.
+
+[`docs/TOOLS.md`](TOOLS.md) is **generated** from the registry, and
+`--check-docs` fails when the file and the registry disagree. Stale docs
+are worse than no docs, because people believe them; this makes the stale
+state unreachable rather than merely discouraged.
+
 ## How this meets the compliance stack
 
 The prompt compliance stack decides *whether an action is allowed by the
@@ -299,7 +443,10 @@ errors by code. `format_status()` prints them.
    the defaults are non-idempotent, 60s, no retry.
 5. Add tests to `tests/test_tooling_system.py`. The existing classes are
    organised by tool family.
-6. Run `./run-checks.sh`.
+6. Run `python -m fullagent.contractmanifest --write` and
+   `python -m fullagent.introspect --write-docs` to refresh the lock file
+   and the generated reference.
+7. Run `./run-checks.sh`. The drift check names anything still missing.
 
 ## What this does not do
 
@@ -316,3 +463,12 @@ errors by code. `format_status()` prints them.
 - `from_error_text` is a heuristic over a string convention. It is
   strictly better than reporting failure as success, and strictly worse
   than a tool that raises.
+- Replay reconstructs what was *sealed*, which is not the same as what
+  happened. A crash between a step's intent and its outcome leaves the
+  intent on the record and the outcome unknown -- that is the honest
+  state, and replay reports it as incomplete rather than guessing.
+- A scorecard measures compliance with the compiled rules, which cover
+  about a third of the prompt. A model can score well and still ignore
+  the advisory two thirds.
+- The rule compiler takes text, not a path, so any prompt ingests without
+  a code change. It cannot tell you whether that prompt is any good.

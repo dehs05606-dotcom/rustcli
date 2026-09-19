@@ -492,7 +492,12 @@ fullagent/
   toolcontract.py  typed contract per tool — schema, error taxonomy, retry, permission
   toolpolicy.py    capabilities, roles, path confinement, command policy, network allow-list
   dispatch.py      the one call path — validate, gate, approve, trace, time out, retry
-  orchestrator.py  plan → execute → verify → roll back, with a sealed step ledger
+  orchestrator.py  plan → execute → verify → roll back, nested sagas, replay by trace id
+  policypipeline.py the permission decision as 7 ordered, individually testable stages
+  contractmanifest.py contract lock file, additive-vs-breaking checks, drift detection
+  recovery.py      every error code mapped to retry / compensate / escalate / abort
+  telemetry.py     per-model scorecards, rolling drift windows, routing proposals
+  introspect.py    headless runtime introspection + the generated tool reference
   promptrules.py   compiles the system prompt into priority-banded rules
   constitution.py  rules as signed, versioned, append-only policy objects
   guardrail.py     three-stage verification over actions and replies
@@ -937,6 +942,30 @@ plan is refused whole and nothing runs at all.
 | **dispatch.py** | The single call path: validate → policy → approval → run → classify → retry → validate the output. A handler runs in a worker thread and is abandoned when it overruns its budget. Only an idempotent call is ever repeated. Every call carries a trace id and lands in the event log. |
 | **orchestrator.py** | Plan, execute, verify, undo. A plan is validated whole before its first step runs; approval is asked once for the plan rather than once per step; a failed step rolls the completed ones back in reverse and reports by name anything it could not reverse. |
 
+### The platform layer
+
+Six pieces sit on top of the contract/dispatch/orchestrator stack. Each
+exists because a specific state was reachable that should not have been.
+
+| Module | The state it makes unreachable |
+|---|---|
+| **policypipeline.py** | A permission decision whose reason is prose nobody can count, and an early-returning check that lets an *ask* hide a later *deny*. Seven ordered stages, each testable alone, each emitting a typed code and structured facts the audit dashboard counts. A stage that crashes denies. |
+| **contractmanifest.py** | A tool whose schema, lock file, docs and tests disagree. `contracts.lock.json` pins every contract; changes are classified additive or breaking by a rule written down once; `--check` fails on eight kinds of drift. |
+| **recovery.py** | Retrying a validation error forever, or rolling back a write that may never have landed. Every one of the nine error codes maps to a tested strategy. A playbook can never overrule the taxonomy. |
+| **orchestrator.py** (extended) | A sub-plan that fails leaving its own children applied; a failing step undone when nobody can know whether it ran; a post-mortem that depends on what somebody remembers. Nested sagas, playbook-driven disposition, and `replay(log, trace_id)` that computes nothing. |
+| **telemetry.py** | A model silently swapped underneath you. Routing returns a *proposal* carrying its numbers; `in_effect` stays on the current model until a named human accepts. |
+| **introspect.py** | Documentation that is confidently wrong. `docs/TOOLS.md` is generated from the registry and `--check-docs` fails when they differ. |
+
+```bash
+python -m fullagent.introspect                 # registry, stages, contracts, metrics
+python -m fullagent.introspect tools --json    # machine-readable
+python -m fullagent.contractmanifest --check   # drift across registry/lock/docs/tests
+```
+
+The prompt rule compiler takes **text**, not a path: `compile_prompt(name,
+text)` and `ratify_prompt(name, text)` ingest any prompt without a code
+change, and a test asserts neither module imports a prompt source.
+
 ## Security model
 
 The short version: **a call that violates the prompt or the machine's
@@ -944,8 +973,10 @@ permissions does not execute**, and everything that did execute is on the
 record. What no client-side layer can do — this one included — is make a
 model obey a prompt; token generation happens elsewhere.
 
-- **Deny by default.** A tool with no capability entry gets no
-  capability. A destructive or outward-facing call with no approval hook
+- **Deny by default, in seven stages.** A tool with no capability entry
+  gets no capability; an unregistered tool is denied by a stage of its
+  own with a typed reason, so the audit can tell "never heard of it"
+  apart from "this role lacks the capability". A destructive or outward-facing call with no approval hook
   is refused, because a session that cannot ask a human must not answer
   on the human's behalf. An approval hook that raises is not consent.
 - **Least privilege.** Four roles, from `untrusted` (read only) to
@@ -1003,7 +1034,11 @@ House rules, all of them enforced by `run-checks.sh`:
 5. **No new schema keyword without a validator.** `validate()` implements
    a documented subset of JSON Schema and a test asserts no tool uses a
    keyword outside it — an unchecked keyword reads as a guarantee.
-6. **Report what actually happened.** Paste real command output in a pull
+6. **A new tool needs its lock file and docs refreshed**:
+   `python -m fullagent.contractmanifest --write` and
+   `python -m fullagent.introspect --write-docs`. Both are committed, and
+   `run-checks.sh` fails when either is stale.
+7. **Report what actually happened.** Paste real command output in a pull
    request. A test that was skipped is not a test that passed.
 
 ---

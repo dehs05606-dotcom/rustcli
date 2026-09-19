@@ -602,5 +602,109 @@ class TestOrchestrator(Sandbox):
         self.assertIn("orchestrator.done", kinds)
 
 
+# ---------------------------------------------------------------------------
+# The tools the other classes do not reach
+# ---------------------------------------------------------------------------
+
+class TestRemainingTools(Sandbox):
+    """Every registered tool needs a test, and the drift checker says so.
+
+    These six had none: the contract drift report in
+    `fullagent/contractmanifest.py` reported them as `untested-tool`, and
+    a check that reports a gap nobody closes is a check people learn to
+    ignore.
+    """
+
+    def test_create_directory_makes_parents(self):
+        d = self.dispatcher(approve=lambda c, a: True)
+        target = self.root / "one" / "two" / "three"
+        out = d.call("create_directory", {"path": str(target)})
+        self.assertTrue(out.ok, out.to_dict())
+        self.assertTrue(target.is_dir())
+
+    def test_move_path_moves_and_needs_approval(self):
+        src = self.root / "from.txt"
+        src.write_text("moving\n")
+        dst = self.root / "to.txt"
+        self.assertTrue(self.contracts["move_path"].needs_approval)
+
+        refused = self.dispatcher(approve=lambda c, a: False).call(
+            "move_path", {"src": str(src), "dst": str(dst)})
+        self.assertFalse(refused.ok)
+        self.assertTrue(src.exists(), "it moved without approval")
+
+        out = self.dispatcher(approve=lambda c, a: True).call(
+            "move_path", {"src": str(src), "dst": str(dst)})
+        self.assertTrue(out.ok, out.to_dict())
+        self.assertTrue(dst.exists() and not src.exists())
+
+    def test_move_path_cannot_move_a_file_out_of_the_roots(self):
+        src = self.root / "stay.txt"
+        src.write_text("stay\n")
+        outside = Path(tempfile.gettempdir()) / "fa-moved-out.txt"
+        outside.unlink(missing_ok=True)
+        out = self.dispatcher(approve=lambda c, a: True).call(
+            "move_path", {"src": str(src), "dst": str(outside)})
+        self.assertFalse(out.ok)
+        self.assertEqual(out.error.code, E_PERMISSION)
+        self.assertTrue(src.exists())
+        self.assertFalse(outside.exists())
+
+    def test_apply_patch_edits_a_file(self):
+        target = self.root / "patched.py"
+        target.write_text("value = 1\n")
+        patch = (f"--- a/{target}\n+++ b/{target}\n"
+                 "@@ -1 +1 @@\n-value = 1\n+value = 2\n")
+        out = self.dispatcher(approve=lambda c, a: True).call(
+            "apply_patch", {"patch": patch})
+        self.assertTrue(out.ok, out.to_dict())
+        self.assertIn("value = 2", target.read_text())
+
+    def test_apply_patch_needs_approval(self):
+        self.assertTrue(self.contracts["apply_patch"].needs_approval)
+        target = self.root / "untouched.py"
+        target.write_text("value = 1\n")
+        patch = (f"--- a/{target}\n+++ b/{target}\n"
+                 "@@ -1 +1 @@\n-value = 1\n+value = 2\n")
+        out = self.dispatcher(approve=lambda c, a: False).call(
+            "apply_patch", {"patch": patch})
+        self.assertFalse(out.ok)
+        self.assertEqual(target.read_text(), "value = 1\n")
+
+    def test_live_shell_keeps_its_directory_between_calls(self):
+        d = self.dispatcher("operator", approve=lambda c, a: True)
+        self.assertTrue(d.call("live_shell_reset", {}).ok)
+        d.call("live_shell", {"command": f"cd {self.root}"})
+        out = d.call("live_shell", {"command": "pwd"})
+        self.assertTrue(out.ok, out.to_dict())
+        self.assertIn(str(self.root), out.value)
+        d.call("live_shell_reset", {})
+
+    def test_live_shell_is_governed_by_the_same_command_policy(self):
+        canary = self.root / "canary.txt"
+        canary.write_text("alive\n")
+        out = self.dispatcher(approve=lambda c, a: True).call(
+            "live_shell", {"command": f"rm -rf {canary}"})
+        self.assertFalse(out.ok, "live_shell bypassed the command policy")
+        self.assertEqual(out.error.code, E_PERMISSION)
+        self.assertTrue(canary.exists())
+
+    def test_web_search_needs_the_network_capability_and_approval(self):
+        self.assertTrue(self.contracts["web_search"].needs_approval)
+        self.assertIn(NET_FETCH, self.contracts["web_search"].permission)
+        self.assertIn("web_search",
+                      self.dispatcher("untrusted").negotiate().unavailable)
+        self.assertIn("web_search",
+                      self.dispatcher("readonly").negotiate().available)
+
+    def test_web_search_does_not_run_without_approval(self):
+        called = []
+        d = self.dispatcher(approve=lambda c, a: False)
+        d.handlers["web_search"] = lambda **kw: called.append(kw) or "results"
+        out = d.call("web_search", {"query": "anything"})
+        self.assertFalse(out.ok)
+        self.assertEqual(called, [], "it searched without approval")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

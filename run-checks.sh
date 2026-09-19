@@ -33,8 +33,17 @@ step "module self-tests" "$PY" run_selftests.py
 # 3. The cross-module suites.
 step "test suite" "$PY" -m unittest discover -s tests -p 'test_*.py' -b
 
-# 4. The contract layer's own invariants, stated loudly because a broken
+# 5. The contract layer's own invariants, stated loudly because a broken
 #    schema is invisible until a model sends the wrong argument.
+# 4. Contract drift: the registry, the lock file, the docs and the tests
+#    must still agree. This is the check that catches a tool added in one
+#    place and forgotten in three.
+step "contract drift" "$PY" -m fullagent.contractmanifest --check
+
+# The tool reference is generated from the registry. If the two disagree,
+# the docs are wrong, and confidently wrong docs are worse than none.
+step "generated docs" "$PY" -m fullagent.introspect --check-docs
+
 step "tool contracts" "$PY" -m fullagent.toolcontract
 step "dispatch core" "$PY" -m fullagent.dispatch
 step "orchestrator" "$PY" -m fullagent.orchestrator

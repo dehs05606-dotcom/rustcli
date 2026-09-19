@@ -219,6 +219,9 @@ class Decision:
     role: str = ""
     capability: str = ""
     rule: str = ""              # which confinement decided it
+    # Every stage's structured rationale, in the order they ran. Empty
+    # only for a Decision built by hand in a test.
+    rationale: tuple = ()
 
     @property
     def allowed(self) -> bool:
@@ -231,7 +234,8 @@ class Decision:
     def to_dict(self) -> dict:
         return {"outcome": self.outcome, "tool": self.tool,
                 "reason": self.reason, "role": self.role,
-                "capability": self.capability, "rule": self.rule}
+                "capability": self.capability, "rule": self.rule,
+                "rationale": [r.to_dict() for r in self.rationale]}
 
 
 class ToolPolicy:
@@ -299,65 +303,30 @@ class ToolPolicy:
     # -- the decision ------------------------------------------------------
 
     def evaluate(self, tool_name: str, args: dict | None = None) -> Decision:
-        """Decide one tool call. Pure — it records, it never executes."""
-        args = args or {}
-        needed = self.capabilities_of(tool_name)
-        if not needed:
-            return self._seal(Decision(
-                DENY, tool_name,
-                f"{tool_name} declares no capabilities, so it holds none",
-                self.role.name, rule="manifest"))
+        """Decide one tool call. Pure -- it records, it never executes."""
+        detailed = self.evaluate_detailed(tool_name, args)
+        return self._seal(Decision(
+            detailed.outcome, tool_name, detailed.reason, self.role.name,
+            capability=detailed.capability, rule=detailed.rule,
+            rationale=detailed.rationale))
 
-        missing = sorted(c for c in needed if not self.role.holds(c))
-        asking = sorted(c for c in needed if c in self.role.ask_capabilities)
-        if missing:
-            return self._seal(Decision(
-                DENY, tool_name,
-                f"role '{self.role.name}' does not hold "
-                f"{', '.join(missing)}", self.role.name,
-                capability=missing[0], rule="capability"))
+    def evaluate_detailed(self, tool_name: str, args: dict | None = None):
+        """The same decision with every stage's rationale attached.
 
-        path_problem = self._path_violation(tool_name, args)
-        if path_problem:
-            return self._seal(Decision(DENY, tool_name, path_problem,
-                                       self.role.name, rule="path-confinement"))
+        The staged form is the real one; `evaluate` is the collapse of it
+        to the single verdict most callers want. They cannot disagree,
+        because one is computed from the other.
+        """
+        # Imported here rather than at module scope: the pipeline is built
+        # out of this module's own vocabulary, so a top-level import would
+        # be a cycle.
+        from .policypipeline import DEFAULT_PIPELINE, Request
 
-        if tool_name in ("run_command", "live_shell"):
-            command = str(args.get("command", ""))
-            if DESTRUCTIVE_RE.search(command):
-                if not self.role.allow_destructive_commands:
-                    return self._seal(Decision(
-                        DENY, tool_name,
-                        f"destructive command denied for role "
-                        f"'{self.role.name}': {command[:80]}",
-                        self.role.name, capability=PROC_EXEC,
-                        rule="command-policy"))
-                return self._seal(Decision(
-                    ASK, tool_name, f"destructive command: {command[:80]}",
-                    self.role.name, capability=PROC_EXEC,
-                    rule="command-policy"))
-
-        if NET_FETCH in needed and args.get("url"):
-            problem = host_allowed(str(args["url"]), self.role.allowed_hosts)
-            if problem:
-                return self._seal(Decision(
-                    DENY, tool_name, problem, self.role.name,
-                    capability=NET_FETCH, rule="network-allow-list"))
-
-        ceiling = self._ceiling_violation(tool_name)
-        if ceiling:
-            return self._seal(Decision(DENY, tool_name, ceiling,
-                                       self.role.name, rule="ceiling"))
-
-        if asking:
-            return self._seal(Decision(
-                ASK, tool_name,
-                f"{', '.join(asking)} needs confirmation under role "
-                f"'{self.role.name}'", self.role.name,
-                capability=asking[0], rule="ask-capability"))
-
-        return self._seal(Decision(ALLOW, tool_name, "", self.role.name,
-                                   rule="capability"))
+        return DEFAULT_PIPELINE.decide(Request(
+            tool=tool_name, args=dict(args or {}), role=self.role,
+            capabilities=self.capabilities_of(tool_name),
+            roots=self.roots, counts=dict(self.counts),
+            known=tool_name in self.manifest))
 
     def record_call(self, tool_name: str) -> None:
         """Count a call that actually ran — what the ceilings measure."""

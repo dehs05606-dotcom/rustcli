@@ -94,8 +94,9 @@ def _summarize(event_type: str, data: dict) -> str:
     if event_type == "tool.result":
         return f"{data.get('name', '?')} -> {data.get('status', '?')}"
     if event_type == "policy.decision":
-        return (f"{data.get('outcome', '?')} {data.get('tool', '?')}: "
-                f"{data.get('reason', '')}")
+        stage = data.get("rule") or "?"
+        return (f"{data.get('outcome', '?')} {data.get('tool', '?')} "
+                f"[{stage}]: {data.get('reason', '')}")
     if event_type == "guardrail.action":
         v = data.get("violations") or []
         return f"{data.get('tool', '?')}: {len(v)} violation(s)"
@@ -151,6 +152,19 @@ def _policy_ref(event_type: str, data: dict) -> str:
     if event_type == "policy.decision":
         return f"role:{data.get('role', '')}/{data.get('rule', '')}"
     return ""
+
+
+def _deny_code(data: dict) -> str:
+    """The typed reason a staged decision refused, not its wording.
+
+    Falls back to the stage name for a decision recorded before the
+    pipeline existed, so an old log still counts rather than vanishing
+    into an "unknown" bucket.
+    """
+    for entry in data.get("rationale") or ():
+        if isinstance(entry, dict) and entry.get("outcome") == "deny":
+            return str(entry.get("code") or entry.get("stage") or "unknown")
+    return str(data.get("rule") or "unknown")
 
 
 @dataclass(frozen=True)
@@ -218,6 +232,12 @@ class Dashboard:
     tampering: int = 0
     level_changes: tuple[str, ...] = ()
     by_category: dict[str, int] = field(default_factory=dict)
+    # Which policy stage refused, and for which typed reason. This is the
+    # question a free-text audit trail cannot answer: "what is actually
+    # stopping us" reads very differently when it is one blocked host
+    # nineteen times than when it is nineteen different rules.
+    denials_by_stage: dict[str, int] = field(default_factory=dict)
+    denials_by_code: dict[str, int] = field(default_factory=dict)
     integrity: IntegrityReport | None = None
 
     @property
@@ -237,7 +257,9 @@ class Dashboard:
              "refusals": self.refusals, "drifts": self.drifts,
              "tampering": self.tampering,
              "level_changes": list(self.level_changes),
-             "by_category": dict(self.by_category)}
+             "by_category": dict(self.by_category),
+             "denials_by_stage": dict(self.denials_by_stage),
+             "denials_by_code": dict(self.denials_by_code)}
         if self.integrity is not None:
             d["integrity_ok"] = self.integrity.ok
         return d
@@ -260,6 +282,11 @@ class Dashboard:
         lines.append(f"  policy denials {self.policy_denials} · "
                      f"regenerations {self.corrections} · "
                      f"refusals {self.refusals}")
+        if self.denials_by_stage:
+            ranked = sorted(self.denials_by_stage.items(),
+                            key=lambda kv: -kv[1])
+            lines.append("  refused by: " + ", ".join(
+                f"{stage} ×{n}" for stage, n in ranked[:4]))
         if self.level_changes:
             lines.append("  enforcement: " + "; ".join(self.level_changes[-4:]))
         if self.drifts:
@@ -331,6 +358,12 @@ class AuditTrail:
             elif ev.type == "policy.decision":
                 if data.get("outcome") == "deny":
                     d.policy_denials += 1
+                    stage = str(data.get("rule") or "unknown")
+                    d.denials_by_stage[stage] = \
+                        d.denials_by_stage.get(stage, 0) + 1
+                    code = _deny_code(data)
+                    d.denials_by_code[code] = \
+                        d.denials_by_code.get(code, 0) + 1
             elif ev.type == "guardrail.verify":
                 d.guardrail_checks += 1
                 if not data.get("ok"):
